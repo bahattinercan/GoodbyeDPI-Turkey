@@ -240,16 +240,16 @@ method_args() {
     esac
 }
 
-# DNS policy (Y2). Plaintext DNS to a third party must be opt-in, so the
-# default is `off`: the library never touches DNS. Set GOODBYEDPI_DNS=yandex to
-# force Yandex DNS for every method, or GOODBYEDPI_DNS=legacy to keep the old
-# per-method table.
+# DNS policy (Y3). Forcing Yandex DNS is the default, exactly like the
+# Windows scripts: leaving DNS untouched did not work on the tested ISP.
+# Set GOODBYEDPI_DNS=off to leave DNS alone, or GOODBYEDPI_DNS=legacy to keep
+# the old per-method table.
 _gdt_dns_policy() {
     local policy="${GOODBYEDPI_DNS:-}"
-    [ -n "$policy" ] || policy='off'
+    [ -n "$policy" ] || policy='yandex'
     case "$policy" in
         off|yandex|legacy) printf '%s\n' "$policy" ;;
-        *) die "GOODBYEDPI_DNS gecersiz: '$policy' (gecerli degerler: off | yandex | legacy)" ;;
+        *) die "GOODBYEDPI_DNS gecersiz: '$policy' (gecerli degerler: off | yandex | legacy, varsayilan: yandex)" ;;
     esac
 }
 
@@ -267,10 +267,10 @@ _gdt_dns_applied() {
 log_dns_policy() {
     case "${1:-off}" in
         off)
-            log "DNS politikasi: off (GOODBYEDPI_DNS=yandex ile Yandex DNS'e zorlanabilir)"
+            log "DNS politikasi: off (opt-out; varsayilan Yandex DNS'tir, GOODBYEDPI_DNS=yandex ile geri acilir)"
             ;;
         yandex)
-            warn "DNS ucuncu tarafa (Yandex) yonlendirilecek: $DEFAULT_DNS_V4_PRIMARY $DEFAULT_DNS_V4_SECONDARY"
+            warn "GIZLILIK: DNS ucuncu tarafa (Yandex) yonlendirilecek: $DEFAULT_DNS_V4_PRIMARY $DEFAULT_DNS_V4_SECONDARY (duz metin DNS, MITM riski). Kapatmak icin GOODBYEDPI_DNS=off"
             ;;
     esac
 }

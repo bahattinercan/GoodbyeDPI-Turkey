@@ -35,12 +35,15 @@ Yedi hazır yöntem var. Hepsini tek tek dene, hangisi ISS'nde çalışıyorsa o
 | Komut | Yöntem | Açıklama | DNS |
 | --- | --- | --- | --- |
 | `sudo ./scripts/turkey_dnsredir.sh` | default | En geniş ayar: fake + md5sig + split + disorder + tlsrec | Yandex |
-| `sudo ./scripts/turkey_dnsredir_alternative_superonline.sh` | alt | Sadece fake + düşük TTL + md5sig | Kapalı |
-| `sudo ./scripts/turkey_dnsredir_alternative2_superonline.sh` | alt2 | Sadece split + disorder | Kapalı |
-| `sudo ./scripts/turkey_dnsredir_alternative3_superonline.sh` | alt3 | alt ile aynı argümanlar, Yandex DNS ile | Yandex |
-| `sudo ./scripts/turkey_dnsredir_alternative4_superonline.sh` | alt4 | alt2 ile aynı argümanlar, Yandex DNS ile | Yandex |
+| `sudo ./scripts/turkey_dnsredir_alternative_superonline.sh` | alt | Sadece fake + düşük TTL + md5sig | Yandex |
+| `sudo ./scripts/turkey_dnsredir_alternative2_superonline.sh` | alt2 | Sadece split + disorder | Yandex |
+| `sudo ./scripts/turkey_dnsredir_alternative3_superonline.sh` | alt3 | alt ile aynı argümanlar | Yandex |
+| `sudo ./scripts/turkey_dnsredir_alternative4_superonline.sh` | alt4 | alt2 ile aynı argümanlar | Yandex |
 | `sudo ./scripts/turkey_dnsredir_alternative5_superonline.sh` | alt5 | split + tlsrec | Yandex |
-| `sudo ./scripts/turkey_dnsredir_alternative6_superonline.sh` | alt6 | Sadece split + tlsrec | Kapalı |
+| `sudo ./scripts/turkey_dnsredir_alternative6_superonline.sh` | alt6 | Sadece split + tlsrec | Yandex |
+
+Yedi yöntemin hepsi varsayılan olarak Yandex DNS'i (77.88.8.8 / 77.88.8.1) zorlar; sistem DNS'ine dokunulmasını
+istemiyorsan `GOODBYEDPI_DNS=off` ile çalıştır.
 
 Betikleri `linux/` dizininin içinden çalıştır. Terminal açık kalır; `Ctrl-C` ile durduğunda proxy ve DNS ayarları geri alınır.
 Ortak katman `linux/scripts/_lib.sh` dosyasında; yöntem tablosunu orada görebilirsin.
@@ -87,10 +90,10 @@ internetin kesilmesi bu yüzdendir. Servis modunda gerekli yetenekler unit dosya
 
 ## Güvenlik notları
 
-- **DNS:** Yandex DNS'e zorlamak için `GOODBYEDPI_DNS=yandex` (77.88.8.8 / 77.88.8.1), eski yöntem tablosu davranışı
-  için `GOODBYEDPI_DNS=legacy` ile çalıştır. Yandex üçüncü taraf bir çözümleyicidir ve şifresiz DNS kullanır; bu yüzden
-  MITM'e açıktır. Hangi çözümleyicinin kullanıldığını `resolvectl dns <arayüz>` ile doğrula; sistem DNS'ini korumak
-  istiyorsan DNS ayarını sen seç, betiğin varsayılanına güvenme.
+- **DNS:** Varsayılan olarak DNS Yandex'e (77.88.8.8 / 77.88.8.1) zorlanır; bu, Windows betiklerindeki davranışla aynıdır.
+  Yandex üçüncü taraf bir çözümleyicidir ve şifresiz DNS kullanır; bu yüzden MITM'e açıktır. DNS'e hiç dokunulmasını
+  istemiyorsan `GOODBYEDPI_DNS=off` ile çalıştır, eski yöntem tablosu davranışı için `GOODBYEDPI_DNS=legacy` kullan.
+  Hangi çözümleyicinin kullanıldığını `resolvectl dns <arayüz>` ile doğrula.
 - **Yetkiler:** Süreç root olarak çalışır ve `--fake`, `--md5sig` için `CAP_NET_RAW` ile ham soket kullanır. Servis modunda
   unit, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `RestrictAddressFamilies`, `SystemCallFilter` gibi
   sandbox anahtarlarıyla sınırlanır. Bir seferlik modda bu sınırlar yoktur, süreç tam root yetkisiyle açık kalır.

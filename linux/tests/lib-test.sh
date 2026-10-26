@@ -179,14 +179,20 @@ expected_dns_legacy() {
         check_eq "method_args:$method" "$(expected_args "$method")" "$(method_args "$method")"
     done
 
-    # DNS policy: plaintext third-party DNS is opt-in (Y2).
+    # DNS policy: forcing Yandex DNS is the default (Y3); `off` is the opt-out.
     unset GOODBYEDPI_DNS
     for method in $METHOD_LIST; do
-        check_eq "method_dns_mode:default-off:$method" 'off' "$(method_dns_mode "$method")"
+        check_eq "method_dns_mode:default-yandex:$method" 'yandex' "$(method_dns_mode "$method")"
     done
 
     GOODBYEDPI_DNS=''
-    check_eq "method_dns_mode:empty-is-off" 'off' "$(method_dns_mode default)"
+    check_eq "method_dns_mode:empty-is-yandex" 'yandex' "$(method_dns_mode default)"
+    unset GOODBYEDPI_DNS
+
+    GOODBYEDPI_DNS='off'
+    for method in $METHOD_LIST; do
+        check_eq "method_dns_mode:off-opt-out:$method" 'off' "$(method_dns_mode "$method")"
+    done
     unset GOODBYEDPI_DNS
 
     GOODBYEDPI_DNS='yandex'
@@ -208,6 +214,7 @@ expected_dns_legacy() {
     fi
     invalid_err="$(GOODBYEDPI_DNS='bogus' method_dns_mode default 2>&1 >/dev/null)"
     check_has "method_dns_mode:invalid-policy-names-off" "$invalid_err" 'off | yandex | legacy'
+    check_has "method_dns_mode:invalid-policy-names-yandex-default" "$invalid_err" 'varsayilan: yandex'
 
     check_eq "method_args:default-when-omitted" "$(expected_args default)" "$(method_args)"
 
@@ -232,6 +239,8 @@ expected_dns_legacy() {
     check_has "log_dns_policy:off-line" "$(log_dns_policy off 2>&1)" 'DNS politikasi: off'
     check_has "log_dns_policy:off-mentions-opt-in" "$(log_dns_policy off 2>&1)" 'GOODBYEDPI_DNS=yandex'
     check_has "log_dns_policy:yandex-warning" "$(log_dns_policy yandex 2>&1)" 'DNS ucuncu tarafa (Yandex) yonlendirilecek'
+    check_has "log_dns_policy:yandex-warning-mentions-off" "$(log_dns_policy yandex 2>&1)" 'GOODBYEDPI_DNS=off'
+    check_has "log_dns_policy:yandex-warning-mentions-plaintext" "$(log_dns_policy yandex 2>&1)" 'duz metin DNS'
     check_eq "log_dns_policy:yandex-no-log-line" '' "$(log_dns_policy yandex 2>/dev/null)"
 )
 

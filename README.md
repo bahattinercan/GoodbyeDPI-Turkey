@@ -41,7 +41,7 @@ Hangisi ISS'nizde çalışıyorsa onu kullanın; Ctrl-C ile durduğunuzda ağ ay
 
 ### Güvenlik notları (kısa)
 
-- DNS varsayılan olarak betiğin kendi seçimine bağlıdır: Yandex DNS'e zorlamak için `GOODBYEDPI_DNS=yandex`, eski yöntem tablosu davranışı için `GOODBYEDPI_DNS=legacy`. Yandex üçüncü taraf ve şifresiz (MITM'e açık) bir çözümleyicidir.
+- DNS varsayılan olarak Yandex'e (77.88.8.8 / 77.88.8.1) zorlanır; kapatmak için `GOODBYEDPI_DNS=off`, eski yöntem tablosu davranışı için `GOODBYEDPI_DNS=legacy`. Yandex üçüncü taraf ve şifresiz (MITM'e açık) bir çözümleyicidir.
 - Süreç root olarak çalışır ve `--fake`, `--md5sig` için `CAP_NET_RAW` ile ham soket kullanır; systemd unit'i sandbox anahtarlarıyla (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies`) sınırlıdır, bir seferlik modda bu sınır yoktur.
 - `CIADPI_HOST=0.0.0.0` yapılmamalı: proxy'yi tüm ağa açar. Varsayılan `127.0.0.1:1080`.
 - Şeffaf modda IPv6 desteği `ip6tables` / `nft ip6` varlığına bağlıdır; yoksa yalnız IPv4 kuralı kurulur ve IPv6 sızıntısı olabilir.
