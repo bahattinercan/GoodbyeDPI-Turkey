@@ -41,11 +41,14 @@ jobs:
         run: |
           echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
+      # The previous wrapped command relied on a helper package that is not
+      # present on the current ubuntu-latest image and failed after ~3s.
+      # Plain apt-get is robust and idempotent.
       - name: Install MinGW-w64
-        run: >
-          sudo rm /var/lib/man-db/auto-update &&
-          sudo DEBIAN_FRONTEND=noninteractive XZ_DEFAULTS="-T0" XZ_OPT="-T0" eatmydata
-          apt install -y --no-install-recommends gcc-mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64
+        shell: bash
 
       - name: Download WinDivert from cache
         id: windivert-cache
@@ -110,8 +113,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 = Intel runner, macos-14 = Apple Silicon (M-series).
-        os: [macos-13, macos-14]
+        # macos-15-intel = Intel (x86_64) runner, macos-14 = Apple Silicon (M1).
+        # The previous Intel image was retired, so its leg stayed queued forever;
+        # macos-15-intel is the current standard Intel label, supported until
+        # August 2027.
+        os: [macos-15-intel, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -125,7 +131,7 @@ jobs:
       - name: Pick artifact arch name
         id: arch
         run: |
-          if [[ "${{ matrix.os }}" == "macos-13" ]]; then
+          if [[ "${{ matrix.os }}" == "macos-15-intel" ]]; then
             echo "name=macos_x86_64" >> "$GITHUB_OUTPUT"
           else
             echo "name=macos_arm64"  >> "$GITHUB_OUTPUT"
