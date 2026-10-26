@@ -85,6 +85,25 @@ sudo GOODBYEDPI_PROXY_MODE=transparent ./scripts/turkey_dnsredir.sh
 Bu mod `CAP_NET_ADMIN` ister ve varsayılan olarak kapalıdır. Dikkat: şeffaf modda elle kural bırakma; kalıcı kural yazarsan
 internetin kesilmesi bu yüzdendir. Servis modunda gerekli yetenekler unit dosyasına otomatik eklenir.
 
+## Güvenlik notları
+
+- **DNS:** Yandex DNS'e zorlamak için `GOODBYEDPI_DNS=yandex` (77.88.8.8 / 77.88.8.1), eski yöntem tablosu davranışı
+  için `GOODBYEDPI_DNS=legacy` ile çalıştır. Yandex üçüncü taraf bir çözümleyicidir ve şifresiz DNS kullanır; bu yüzden
+  MITM'e açıktır. Hangi çözümleyicinin kullanıldığını `resolvectl dns <arayüz>` ile doğrula; sistem DNS'ini korumak
+  istiyorsan DNS ayarını sen seç, betiğin varsayılanına güvenme.
+- **Yetkiler:** Süreç root olarak çalışır ve `--fake`, `--md5sig` için `CAP_NET_RAW` ile ham soket kullanır. Servis modunda
+  unit, `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `RestrictAddressFamilies`, `SystemCallFilter` gibi
+  sandbox anahtarlarıyla sınırlanır. Bir seferlik modda bu sınırlar yoktur, süreç tam root yetkisiyle açık kalır.
+- **Dinleme adresi:** `CIADPI_HOST=0.0.0.0` **yapılmamalı**; proxy'yi tüm ağa açar (açık proxy). Varsayılan
+  `127.0.0.1:1080` adresidir, yerel makine dışından erişilemez.
+- **IPv6:** Şeffaf modda IPv4 ve IPv6 kuralları birlikte kurulur. Sistemde `ip6tables` / `nft ip6` yoksa betik uyarı verip
+  yalnız IPv4 kurallarıyla devam eder; bu durumda IPv6 trafiği proxy'yi atlar ve IPv6 sızıntısı olabilir.
+- **Kesinti sonrası temizlik:** `sudo ./scripts/service_remove.sh`, `systemctl is-active goodbyedpi-turkey`,
+  `pgrep -a ciadpi`, `gsettings get org.gnome.system.proxy mode`, `resolvectl dns <arayüz>` çıktılarına bak; şeffaf modda
+  elle kural kaldıysa `sudo iptables -t nat -F GOODBYEDPI_TURKEY`.
+- **Derleme:** byedpi belirli bir commit'e sabitlenmiştir (`BYEDPI_COMMIT`). Güncellemek için önce
+  `BYEDPI_ALLOW_UNPINNED=1 ./build.sh` ile derle, farkı incele, sonra yeni SHA'yı `BYEDPI_COMMIT` olarak yaz.
+
 ## Doğrulama / test
 
 ```bash

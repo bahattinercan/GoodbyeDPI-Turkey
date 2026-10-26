@@ -39,6 +39,15 @@ Hangisi ISS'nizde çalışıyorsa onu kullanın; Ctrl-C ile durduğunuzda ağ ay
 
 `systemctl is-active goodbyedpi-turkey`, `pgrep -a ciadpi`, `gsettings get org.gnome.system.proxy mode` ve `resolvectl dns <arayüz>` çıktılarına bakın. Takıldığınızda `sudo ./scripts/service_remove.sh` ile temizleyip yeniden deneyin. Yöntem tablosu ve şeffaf mod için **[`linux/README.md`](linux/README.md)**.
 
+### Güvenlik notları (kısa)
+
+- DNS varsayılan olarak betiğin kendi seçimine bağlıdır: Yandex DNS'e zorlamak için `GOODBYEDPI_DNS=yandex`, eski yöntem tablosu davranışı için `GOODBYEDPI_DNS=legacy`. Yandex üçüncü taraf ve şifresiz (MITM'e açık) bir çözümleyicidir.
+- Süreç root olarak çalışır ve `--fake`, `--md5sig` için `CAP_NET_RAW` ile ham soket kullanır; systemd unit'i sandbox anahtarlarıyla (`NoNewPrivileges`, `ProtectSystem=strict`, `RestrictAddressFamilies`) sınırlıdır, bir seferlik modda bu sınır yoktur.
+- `CIADPI_HOST=0.0.0.0` yapılmamalı: proxy'yi tüm ağa açar. Varsayılan `127.0.0.1:1080`.
+- Şeffaf modda IPv6 desteği `ip6tables` / `nft ip6` varlığına bağlıdır; yoksa yalnız IPv4 kuralı kurulur ve IPv6 sızıntısı olabilir.
+- byedpi belirli bir commit'e sabitlenmiştir (`BYEDPI_COMMIT`); güncellemek için önce `BYEDPI_ALLOW_UNPINNED=1 ./build.sh` ile derleyin, sonra yeni SHA'yı yazın.
+- Kalıntı bırakmamak için işiniz bittiğinde `sudo ./scripts/service_remove.sh` çalıştırın; ayrıntılar için `linux/README.md`.
+
 # SplitWire-Turkey Hakkında Önemli Not (29.07.2025)
 >
 > [!IMPORTANT]
