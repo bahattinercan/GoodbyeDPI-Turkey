@@ -155,7 +155,7 @@ expected_args() {
     esac
 }
 
-expected_dns() {
+expected_dns_legacy() {
     case "$1" in
         default | alt3 | alt4 | alt5) printf '%s' 'yandex' ;;
         alt | alt2 | alt6)            printf '%s' 'off' ;;
@@ -169,8 +169,37 @@ expected_dns() {
 
     for method in $METHOD_LIST; do
         check_eq "method_args:$method" "$(expected_args "$method")" "$(method_args "$method")"
-        check_eq "method_dns_mode:$method" "$(expected_dns "$method")" "$(method_dns_mode "$method")"
     done
+
+    # DNS policy: plaintext third-party DNS is opt-in (Y2).
+    unset GOODBYEDPI_DNS
+    for method in $METHOD_LIST; do
+        check_eq "method_dns_mode:default-off:$method" 'off' "$(method_dns_mode "$method")"
+    done
+
+    GOODBYEDPI_DNS=''
+    check_eq "method_dns_mode:empty-is-off" 'off' "$(method_dns_mode default)"
+    unset GOODBYEDPI_DNS
+
+    GOODBYEDPI_DNS='yandex'
+    for method in $METHOD_LIST; do
+        check_eq "method_dns_mode:yandex-forces:$method" 'yandex' "$(method_dns_mode "$method")"
+    done
+    unset GOODBYEDPI_DNS
+
+    GOODBYEDPI_DNS='legacy'
+    for method in $METHOD_LIST; do
+        check_eq "method_dns_mode:legacy:$method" "$(expected_dns_legacy "$method")" "$(method_dns_mode "$method")"
+    done
+    unset GOODBYEDPI_DNS
+
+    if (GOODBYEDPI_DNS='bogus' method_dns_mode default >/dev/null 2>&1); then
+        fail "method_dns_mode:invalid-policy-dies"
+    else
+        pass "method_dns_mode:invalid-policy-dies"
+    fi
+    invalid_err="$(GOODBYEDPI_DNS='bogus' method_dns_mode default 2>&1 >/dev/null)"
+    check_has "method_dns_mode:invalid-policy-names-off" "$invalid_err" 'off | yandex | legacy'
 
     check_eq "method_args:default-when-omitted" "$(expected_args default)" "$(method_args)"
 
@@ -189,6 +218,13 @@ expected_dns() {
     else
         pass "method_dns_mode:unknown-method-dies"
     fi
+
+    # log_dns_policy must make the effective policy visible, and must warn
+    # before DNS is handed to a third party.
+    check_has "log_dns_policy:off-line" "$(log_dns_policy off 2>&1)" 'DNS politikasi: off'
+    check_has "log_dns_policy:off-mentions-opt-in" "$(log_dns_policy off 2>&1)" 'GOODBYEDPI_DNS=yandex'
+    check_has "log_dns_policy:yandex-warning" "$(log_dns_policy yandex 2>&1)" 'DNS ucuncu tarafa (Yandex) yonlendirilecek'
+    check_eq "log_dns_policy:yandex-no-log-line" '' "$(log_dns_policy yandex 2>/dev/null)"
 )
 
 # --------------------------------------------------------------------------
@@ -326,6 +362,31 @@ expected_dns() {
     restore_state >/dev/null 2>&1
     rc=$?
     check_eq "restore_state:second-call-safe" 0 "$rc"
+
+    # Y2: DNS is opt-in, so a run that did not change DNS must not write DNS at
+    # teardown either (the saved flag records that decision).
+    calls_reset
+    save_state lo 0 >/dev/null 2>&1
+    check_eq "save_state:dns-applied-flag-off" 'SAVED_DNS_APPLIED=0' \
+        "$(grep '^SAVED_DNS_APPLIED=' "$STATE_FILE" 2>/dev/null)"
+    out="$(restore_state 2>&1)"
+    rc=$?
+    trace="$(calls)"
+    check_eq "restore_state:dns-not-applied-rc" 0 "$rc"
+    check_has_not "restore_state:dns-not-applied-no-revert" "$trace" 'resolvectl revert'
+    check_has_not "restore_state:dns-not-applied-no-flush" "$trace" 'flush-caches'
+    check_has "restore_state:dns-not-applied-log" "$out" 'DNS geri yuklemesi atlandi'
+
+    # Service install reuses an existing state file, so a run that does change
+    # DNS must flip the saved flag — otherwise its teardown would skip DNS.
+    calls_reset
+    save_state lo 0 >/dev/null 2>&1
+    _gdt_mark_dns_applied >/dev/null 2>&1
+    check_eq "mark_dns_applied:flag-flipped" 'SAVED_DNS_APPLIED=1' \
+        "$(grep '^SAVED_DNS_APPLIED=' "$STATE_FILE" 2>/dev/null)"
+    calls_reset
+    restore_state >/dev/null 2>&1
+    check_has "mark_dns_applied:teardown-reverts-dns" "$(calls)" 'resolvectl flush-caches'
 )
 
 # --------------------------------------------------------------------------
@@ -486,6 +547,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
 
     check_eq "require_root:cached-credential-rc" 0 "$rc"
     check_has "require_root:cached-credential-reexec" "$trace" "sudo --preserve-env=$SUDO_KEEP -- $FAKE_WRAPPER"
+    check_has "require_root:preserve-env-carries-dns-policy" "$SUDO_KEEP" 'GOODBYEDPI_DNS'
     check_has_not "require_root:cached-credential-no-sudo-E" "$trace" 'sudo -E'
     check_has_not "require_root:cached-credential-no-hint" "$out" 'faillock'
 )

@@ -240,12 +240,53 @@ method_args() {
     esac
 }
 
+# DNS policy (Y2). Plaintext DNS to a third party must be opt-in, so the
+# default is `off`: the library never touches DNS. Set GOODBYEDPI_DNS=yandex to
+# force Yandex DNS for every method, or GOODBYEDPI_DNS=legacy to keep the old
+# per-method table.
+_gdt_dns_policy() {
+    local policy="${GOODBYEDPI_DNS:-}"
+    [ -n "$policy" ] || policy='off'
+    case "$policy" in
+        off|yandex|legacy) printf '%s\n' "$policy" ;;
+        *) die "GOODBYEDPI_DNS gecersiz: '$policy' (gecerli degerler: off | yandex | legacy)" ;;
+    esac
+}
+
+# _gdt_dns_applied <mode> — 1 when this run will change DNS, else 0.
+_gdt_dns_applied() {
+    if [ "${1:-off}" = 'yandex' ]; then
+        printf '1\n'
+    else
+        printf '0\n'
+    fi
+}
+
+# log_dns_policy <mode> — make the effective DNS decision visible before any
+# DNS change happens (and warn when DNS is handed to a third party).
+log_dns_policy() {
+    case "${1:-off}" in
+        off)
+            log "DNS politikasi: off (GOODBYEDPI_DNS=yandex ile Yandex DNS'e zorlanabilir)"
+            ;;
+        yandex)
+            warn "DNS ucuncu tarafa (Yandex) yonlendirilecek: $DEFAULT_DNS_V4_PRIMARY $DEFAULT_DNS_V4_SECONDARY"
+            ;;
+    esac
+}
+
 method_dns_mode() {
-    local method="${1:-default}"
+    local method="${1:-default}" policy
     _is_method "$method" || die "Bilinmeyen yontem: $method (gecerli: $_METHODS)"
-    case "$method" in
-        default|alt3|alt4|alt5) printf '%s\n' 'yandex' ;;
-        alt|alt2|alt6)          printf '%s\n' 'off' ;;
+    policy=$(_gdt_dns_policy) || exit 1
+    case "$policy" in
+        yandex|off) printf '%s\n' "$policy" ;;
+        legacy)
+            case "$method" in
+                default|alt3|alt4|alt5) printf '%s\n' 'yandex' ;;
+                alt|alt2|alt6)          printf '%s\n' 'off' ;;
+            esac
+            ;;
     esac
 }
 
@@ -313,9 +354,14 @@ _env_file_path() {
     fi
 }
 
-# save_state <iface> — snapshot everything apply_* can change.
+# save_state <iface> [dns_applied] — snapshot everything apply_* can change.
+# <dns_applied> records whether this run will actually change DNS (1/0); the
+# teardown only reverts DNS when it does (Y2: DNS is opt-in, and a run that
+# never touched DNS must not write DNS at teardown). An older state file has no
+# such key, so it is treated as 1 (the pre-Y2 behaviour).
 save_state() {
     local iface="${1:-}"
+    local dns_applied="${2:-1}"
     [ -n "$iface" ] || iface=$(detect_default_iface)
 
     local dns_backend proxy_backend prev_dns="" resolv_bak="" env_file="" env_present=0
@@ -361,6 +407,7 @@ SAVED_IFACE=$(_gdt_q "$iface")
 SAVED_PROXY_MODE=$(_gdt_q "$PROXY_MODE")
 SAVED_DNS_BACKEND=$(_gdt_q "$dns_backend")
 SAVED_DNS_PREV=$(_gdt_q "$prev_dns")
+SAVED_DNS_APPLIED=$(_gdt_q "$dns_applied")
 SAVED_RESOLV_BACKUP=$(_gdt_q "$resolv_bak")
 SAVED_PROXY_BACKEND=$(_gdt_q "$proxy_backend")
 SAVED_GS_MODE=$(_gdt_q "$gs_mode")
@@ -396,6 +443,7 @@ _gdt_load_state() {
             SAVED_PROXY_MODE)      SAVED_PROXY_MODE="$val" ;;
             SAVED_DNS_BACKEND)     SAVED_DNS_BACKEND="$val" ;;
             SAVED_DNS_PREV)        SAVED_DNS_PREV="$val" ;;
+            SAVED_DNS_APPLIED)     SAVED_DNS_APPLIED="$val" ;;
             SAVED_RESOLV_BACKUP)   SAVED_RESOLV_BACKUP="$val" ;;
             SAVED_PROXY_BACKEND)   SAVED_PROXY_BACKEND="$val" ;;
             SAVED_GS_MODE)         SAVED_GS_MODE="$val" ;;
@@ -408,6 +456,20 @@ _gdt_load_state() {
             SAVED_TRANSPARENT_V6)  SAVED_TRANSPARENT_V6="$val" ;;
         esac
     done
+}
+
+# _gdt_mark_dns_applied — flip the persisted flag so a teardown reverts the
+# DNS this run is about to change, even when an older state file is reused
+# (service install keeps an existing $STATE_FILE).
+_gdt_mark_dns_applied() {
+    [ -r "$STATE_FILE" ] || return 0
+    grep -q '^SAVED_DNS_APPLIED=0$' "$STATE_FILE" 2>/dev/null || return 0
+    local body
+    body=$(sed 's/^SAVED_DNS_APPLIED=0$/SAVED_DNS_APPLIED=1/' "$STATE_FILE")
+    [ -n "$body" ] || return 0
+    _GDT_STATE_BODY="$body"
+    printf '%s\n' "$body" | _write_file "$STATE_FILE"
+    log "Durum dosyasinda DNS geri yukleme bayragi acildi: $STATE_FILE"
 }
 
 # restore_state — idempotent; safe to call twice and with no state at all.
@@ -426,7 +488,7 @@ restore_state() {
     fi
 
     SAVED_IFACE=''; SAVED_PROXY_MODE=''; SAVED_DNS_BACKEND=''; SAVED_DNS_PREV=''
-    SAVED_RESOLV_BACKUP=''; SAVED_PROXY_BACKEND=''; SAVED_GS_MODE=''
+    SAVED_DNS_APPLIED=''; SAVED_RESOLV_BACKUP=''; SAVED_PROXY_BACKEND=''; SAVED_GS_MODE=''
     SAVED_GS_HOST=''; SAVED_GS_PORT=''; SAVED_GS_IGNORE=''
     SAVED_ENV_FILE=''; SAVED_ENV_FILE_PRESENT=''
     SAVED_TRANSPARENT_BACKEND=''; SAVED_TRANSPARENT_V6=''
@@ -459,26 +521,30 @@ restore_state() {
         *) : ;;
     esac
 
-    case "${SAVED_DNS_BACKEND:-none}" in
-        resolved)
-            if [ -n "${SAVED_DNS_PREV:-}" ]; then
-                # shellcheck disable=SC2086
-                run resolvectl dns "$SAVED_IFACE" $SAVED_DNS_PREV || true
-            else
-                run resolvectl revert "$SAVED_IFACE" || true
-            fi
-            run resolvectl flush-caches || true
-            ;;
-        resolvconf)
-            if [ -n "${SAVED_RESOLV_BACKUP:-}" ] && [ -f "$SAVED_RESOLV_BACKUP" ]; then
-                run cp -p "$SAVED_RESOLV_BACKUP" /etc/resolv.conf || true
-                run rm -f "$SAVED_RESOLV_BACKUP"
-            else
-                log "resolv.conf yedegi yok; DNS degistirilmemis olabilir"
-            fi
-            ;;
-        *) : ;;
-    esac
+    if [ "${SAVED_DNS_APPLIED:-1}" = '1' ]; then
+        case "${SAVED_DNS_BACKEND:-none}" in
+            resolved)
+                if [ -n "${SAVED_DNS_PREV:-}" ]; then
+                    # shellcheck disable=SC2086
+                    run resolvectl dns "$SAVED_IFACE" $SAVED_DNS_PREV || true
+                else
+                    run resolvectl revert "$SAVED_IFACE" || true
+                fi
+                run resolvectl flush-caches || true
+                ;;
+            resolvconf)
+                if [ -n "${SAVED_RESOLV_BACKUP:-}" ] && [ -f "$SAVED_RESOLV_BACKUP" ]; then
+                    run cp -p "$SAVED_RESOLV_BACKUP" /etc/resolv.conf || true
+                    run rm -f "$SAVED_RESOLV_BACKUP"
+                else
+                    log "resolv.conf yedegi yok; DNS degistirilmemis olabilir"
+                fi
+                ;;
+            *) : ;;
+        esac
+    else
+        log 'DNS politikasi: off — bu calisma DNS degistirmedi, DNS geri yuklemesi atlandi'
+    fi
 
     if [ "$from_file" = '1' ]; then
         run rm -f "$STATE_FILE"
@@ -862,7 +928,9 @@ run_method_oneshot() {
     iface=$(detect_default_iface)
 
     install_cleanup_trap
-    save_state "$iface"
+    save_state "$iface" "$(_gdt_dns_applied "$mode")"
+    [ "$mode" = 'yandex' ] && _gdt_mark_dns_applied
+    log_dns_policy "$mode"
     [ "$mode" = 'yandex' ] && apply_dns "$iface"
     if [ "$PROXY_MODE" = 'transparent' ]; then
         transparent_up
@@ -898,7 +966,7 @@ run_method_service_install() {
     if [ -f "$STATE_FILE" ]; then
         log "Onceki durum korunuyor: $STATE_FILE"
     else
-        save_state "$iface"
+        save_state "$iface" "$(_gdt_dns_applied "$mode")"
     fi
 
     # same single argv split as the one-shot path: no globbing
@@ -907,6 +975,8 @@ run_method_service_install() {
     run systemctl daemon-reload
     run systemctl enable --now "$UNIT_NAME"
 
+    log_dns_policy "$mode"
+    [ "$mode" = 'yandex' ] && _gdt_mark_dns_applied
     [ "$mode" = 'yandex' ] && apply_dns "$iface"
     if [ "$PROXY_MODE" = 'transparent' ]; then
         transparent_up
