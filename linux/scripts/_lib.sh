@@ -37,6 +37,9 @@ PROXY_MODE="${GOODBYEDPI_PROXY_MODE:-${PROXY_MODE:-socks}}"
 # nft table/chain names used by transparent mode
 NFT_TABLE="goodbyedpi_turkey"
 IPT_CHAIN="GOODBYEDPI_TURKEY"
+# IPv6 mirrors: IPv6 traffic must not bypass the redirect (O2).
+IP6_T_CHAIN="GOODBYEDPI_TURKEY6"
+NFT6_TABLE="goodbyedpi_turkey6"
 
 case "$PROXY_MODE" in
     socks|transparent) ;;
@@ -317,10 +320,18 @@ save_state() {
 
     local dns_backend proxy_backend prev_dns="" resolv_bak="" env_file="" env_present=0
     local gs_mode='' gs_host='' gs_port='' gs_ignore=''
+    local t_backend='none' t_v6=0
     local body
 
     dns_backend=$(detect_dns_backend)
     proxy_backend=$(detect_proxy_backend)
+
+    # Transparent mode records what it is about to install, so teardown uses
+    # the same backend instead of re-detecting it later (O3).
+    if [ "$PROXY_MODE" = 'transparent' ]; then
+        t_backend=$(_transparent_backend)
+        t_v6=$(_transparent_v6_capable "$t_backend")
+    fi
 
     if [ "$dns_backend" = 'resolved' ]; then
         prev_dns=$(_capture resolvectl dns "$iface" | sed -n 's/^[^:]*:[[:space:]]*//p' | head -n 1)
@@ -358,6 +369,8 @@ SAVED_GS_PORT=$(_gdt_q "$gs_port")
 SAVED_GS_IGNORE=$(_gdt_q "$gs_ignore")
 SAVED_ENV_FILE=$(_gdt_q "$env_file")
 SAVED_ENV_FILE_PRESENT=$(_gdt_q "$env_present")
+SAVED_TRANSPARENT_BACKEND=$(_gdt_q "$t_backend")
+SAVED_TRANSPARENT_V6=$(_gdt_q "$t_v6")
 EOF
 )
     _GDT_STATE_BODY="$body"
@@ -391,6 +404,8 @@ _gdt_load_state() {
             SAVED_GS_IGNORE)       SAVED_GS_IGNORE="$val" ;;
             SAVED_ENV_FILE)        SAVED_ENV_FILE="$val" ;;
             SAVED_ENV_FILE_PRESENT) SAVED_ENV_FILE_PRESENT="$val" ;;
+            SAVED_TRANSPARENT_BACKEND) SAVED_TRANSPARENT_BACKEND="$val" ;;
+            SAVED_TRANSPARENT_V6)  SAVED_TRANSPARENT_V6="$val" ;;
         esac
     done
 }
@@ -414,28 +429,31 @@ restore_state() {
     SAVED_RESOLV_BACKUP=''; SAVED_PROXY_BACKEND=''; SAVED_GS_MODE=''
     SAVED_GS_HOST=''; SAVED_GS_PORT=''; SAVED_GS_IGNORE=''
     SAVED_ENV_FILE=''; SAVED_ENV_FILE_PRESENT=''
+    SAVED_TRANSPARENT_BACKEND=''; SAVED_TRANSPARENT_V6=''
     # here-string (not a pipe) so the SAVED_* assignments survive in this shell
     _gdt_load_state <<< "$body"
 
-    # transparent rules first: they reference the port ciadpi was listening on
-    transparent_down
+    # transparent rules first: they reference the port ciadpi was listening on.
+    # Teardown is failure-tolerant by design, but the `|| true` here makes the
+    # guarantee explicit: nothing may abort before the proxy/DNS restore below.
+    transparent_down || true
 
     case "${SAVED_PROXY_BACKEND:-none}" in
         gsettings)
             if [ -n "${SAVED_GS_MODE:-}" ]; then
-                run gsettings set org.gnome.system.proxy mode "$SAVED_GS_MODE"
+                run gsettings set org.gnome.system.proxy mode "$SAVED_GS_MODE" || true
             else
-                run gsettings set org.gnome.system.proxy mode 'none'
+                run gsettings set org.gnome.system.proxy mode 'none' || true
             fi
-            [ -n "${SAVED_GS_HOST:-}" ] && run gsettings set org.gnome.system.proxy.socks host "$SAVED_GS_HOST"
-            [ -n "${SAVED_GS_PORT:-}" ] && run gsettings set org.gnome.system.proxy.socks port "$SAVED_GS_PORT"
-            [ -n "${SAVED_GS_IGNORE:-}" ] && run gsettings set org.gnome.system.proxy ignore-hosts "$SAVED_GS_IGNORE"
+            [ -n "${SAVED_GS_HOST:-}" ] && { run gsettings set org.gnome.system.proxy.socks host "$SAVED_GS_HOST" || true; }
+            [ -n "${SAVED_GS_PORT:-}" ] && { run gsettings set org.gnome.system.proxy.socks port "$SAVED_GS_PORT" || true; }
+            [ -n "${SAVED_GS_IGNORE:-}" ] && { run gsettings set org.gnome.system.proxy ignore-hosts "$SAVED_GS_IGNORE" || true; }
             ;;
         environmentd)
             if [ "${SAVED_ENV_FILE_PRESENT:-0}" = '1' ]; then
                 log "Onceki environment.d dosyasi korunuyor: ${SAVED_ENV_FILE:-}"
             elif [ -n "${SAVED_ENV_FILE:-}" ]; then
-                run rm -f "$SAVED_ENV_FILE"
+                run rm -f "$SAVED_ENV_FILE" || true
             fi
             ;;
         *) : ;;
@@ -445,15 +463,15 @@ restore_state() {
         resolved)
             if [ -n "${SAVED_DNS_PREV:-}" ]; then
                 # shellcheck disable=SC2086
-                run resolvectl dns "$SAVED_IFACE" $SAVED_DNS_PREV
+                run resolvectl dns "$SAVED_IFACE" $SAVED_DNS_PREV || true
             else
-                run resolvectl revert "$SAVED_IFACE"
+                run resolvectl revert "$SAVED_IFACE" || true
             fi
-            run resolvectl flush-caches
+            run resolvectl flush-caches || true
             ;;
         resolvconf)
             if [ -n "${SAVED_RESOLV_BACKUP:-}" ] && [ -f "$SAVED_RESOLV_BACKUP" ]; then
-                run cp -p "$SAVED_RESOLV_BACKUP" /etc/resolv.conf
+                run cp -p "$SAVED_RESOLV_BACKUP" /etc/resolv.conf || true
                 run rm -f "$SAVED_RESOLV_BACKUP"
             else
                 log "resolv.conf yedegi yok; DNS degistirilmemis olabilir"
@@ -601,6 +619,7 @@ transparent_up() {
                 run iptables -t nat -A OUTPUT -j "$IPT_CHAIN"
             fi
             log "Seffaf mod: iptables nat/$IPT_CHAIN -> 127.0.0.1:$CIADPI_PORT"
+            _transparent_up_ip6tables
             ;;
         nft)
             if nft list table "ip $NFT_TABLE" >/dev/null 2>&1; then
@@ -615,6 +634,7 @@ transparent_up() {
             run nft "add rule ip $NFT_TABLE output tcp dport $CIADPI_PORT return"
             run nft "add rule ip $NFT_TABLE output tcp redirect to :$CIADPI_PORT"
             log "Seffaf mod: nft $NFT_TABLE output -> 127.0.0.1:$CIADPI_PORT"
+            _transparent_up_nft6
             ;;
         none)
             die "Seffaf mod icin iptables veya nft gerekli; ikisi de bulunamadi"
@@ -622,25 +642,138 @@ transparent_up() {
     esac
 }
 
+# 1 when <backend> can mirror the redirect for IPv6, 0 otherwise. Read-only:
+# it only asks whether the tool is present, never whether a rule exists.
+_transparent_v6_capable() {
+    case "${1:-}" in
+        iptables) command -v ip6tables >/dev/null 2>&1 && printf '1\n' || printf '0\n' ;;
+        nft)      command -v nft >/dev/null 2>&1 && printf '1\n' || printf '0\n' ;;
+        *)        printf '0\n' ;;
+    esac
+}
+
+# IPv6 mirror of the iptables rules. Missing ip6tables is a warning, never a
+# failure: IPv4 keeps working and teardown stays symmetric.
+_transparent_up_ip6tables() {
+    if ! command -v ip6tables >/dev/null 2>&1; then
+        warn "ip6tables yok; IPv6 seffaf yonlendirme kurulmadi (IPv6 trafigi proxy'yi atlar)"
+        return 0
+    fi
+    if ip6tables -t nat -n -L "$IP6_T_CHAIN" >/dev/null 2>&1; then
+        run ip6tables -t nat -F "$IP6_T_CHAIN"
+    else
+        run ip6tables -t nat -N "$IP6_T_CHAIN"
+    fi
+    run ip6tables -t nat -A "$IP6_T_CHAIN" -d ::1/128 -j RETURN
+    run ip6tables -t nat -A "$IP6_T_CHAIN" -d fc00::/7 -j RETURN
+    run ip6tables -t nat -A "$IP6_T_CHAIN" -d fe80::/10 -j RETURN
+    run ip6tables -t nat -A "$IP6_T_CHAIN" -p tcp -m tcp --dport "$CIADPI_PORT" -j RETURN
+    run ip6tables -t nat -A "$IP6_T_CHAIN" -p tcp -j REDIRECT --to-ports "$CIADPI_PORT"
+    if ! ip6tables -t nat -C OUTPUT -j "$IP6_T_CHAIN" >/dev/null 2>&1; then
+        run ip6tables -t nat -A OUTPUT -j "$IP6_T_CHAIN"
+    fi
+    log "Seffaf mod: ip6tables nat/$IP6_T_CHAIN -> 127.0.0.1:$CIADPI_PORT"
+    return 0
+}
+
+# IPv6 mirror of the nft rules. The table create is the capability probe: if
+# nft cannot add it (kernel without ip6 nat, no netns support) the IPv6 half is
+# skipped with a warning instead of aborting a working IPv4 setup.
+_transparent_up_nft6() {
+    if nft list table "ip6 $NFT6_TABLE" >/dev/null 2>&1; then
+        run nft "delete table ip6 $NFT6_TABLE" || true
+    fi
+    if ! run nft "add table ip6 $NFT6_TABLE"; then
+        warn "nft ip6 tablosu olusturulamadi; IPv6 seffaf yonlendirme atlandi (IPv6 trafigi proxy'yi atlar)"
+        return 0
+    fi
+    run nft "add chain ip6 $NFT6_TABLE output { type nat hook output priority 0; policy accept; }"
+    run nft "add rule ip6 $NFT6_TABLE output ip6 daddr ::1/128 return"
+    run nft "add rule ip6 $NFT6_TABLE output ip6 daddr fc00::/7 return"
+    run nft "add rule ip6 $NFT6_TABLE output ip6 daddr fe80::/10 return"
+    run nft "add rule ip6 $NFT6_TABLE output tcp dport $CIADPI_PORT return"
+    run nft "add rule ip6 $NFT6_TABLE output ip6 nexthdr tcp redirect to :$CIADPI_PORT"
+    log "Seffaf mod: nft $NFT6_TABLE output -> 127.0.0.1:$CIADPI_PORT"
+    return 0
+}
+
+# --- teardown -------------------------------------------------------------
+# Every helper below is failure-tolerant: `set -e` must never abort a cleanup,
+# because restore_state has to reach the proxy/DNS restore after it (O3).
+
+_transparent_down_iptables() {
+    command -v iptables >/dev/null 2>&1 || return 0
+    if iptables -t nat -n -L "$IPT_CHAIN" >/dev/null 2>&1; then
+        run iptables -t nat -D OUTPUT -j "$IPT_CHAIN" || true
+        run iptables -t nat -F "$IPT_CHAIN" || true
+        run iptables -t nat -X "$IPT_CHAIN" || true
+        log "Seffaf mod IPv4 kurallari kaldirildi (iptables)"
+    fi
+    return 0
+}
+
+_transparent_down_ip6tables() {
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    if ip6tables -t nat -n -L "$IP6_T_CHAIN" >/dev/null 2>&1; then
+        run ip6tables -t nat -D OUTPUT -j "$IP6_T_CHAIN" || true
+        run ip6tables -t nat -F "$IP6_T_CHAIN" || true
+        run ip6tables -t nat -X "$IP6_T_CHAIN" || true
+        log "Seffaf mod IPv6 kurallari kaldirildi (ip6tables)"
+    fi
+    return 0
+}
+
+_transparent_down_nft() {
+    command -v nft >/dev/null 2>&1 || return 0
+    if nft list table "ip $NFT_TABLE" >/dev/null 2>&1; then
+        run nft "delete table ip $NFT_TABLE" || true
+        log "Seffaf mod IPv4 tablosu kaldirildi (nft)"
+    fi
+    return 0
+}
+
+_transparent_down_nft6() {
+    command -v nft >/dev/null 2>&1 || return 0
+    if nft list table "ip6 $NFT6_TABLE" >/dev/null 2>&1; then
+        run nft "delete table ip6 $NFT6_TABLE" || true
+        log "Seffaf mod IPv6 tablosu kaldirildi (nft)"
+    fi
+    return 0
+}
+
 transparent_down() {
-    local backend
-    backend=$(_transparent_backend)
+    local backend v6
+    # Prefer the backend recorded at install time: re-detecting at teardown
+    # time leaves nft-installed rules behind when iptables happens to be
+    # present as well (O3).
+    backend="${SAVED_TRANSPARENT_BACKEND:-}"
+    if [ -n "$backend" ]; then
+        v6="${SAVED_TRANSPARENT_V6:-$(_transparent_v6_capable "$backend")}"
+    else
+        backend=$(_transparent_backend)
+        v6=$(_transparent_v6_capable "$backend")
+    fi
     case "$backend" in
         iptables)
-            if iptables -t nat -n -L "$IPT_CHAIN" >/dev/null 2>&1; then
-                run iptables -t nat -D OUTPUT -j "$IPT_CHAIN"
-                run iptables -t nat -F "$IPT_CHAIN"
-                run iptables -t nat -X "$IPT_CHAIN"
-                log "Seffaf mod kurallari kaldirildi (iptables)"
-            fi
+            _transparent_down_iptables
+            [ "$v6" = '1' ] && _transparent_down_ip6tables
+            # leftovers of the other backend, when it is available
+            _transparent_down_nft
+            _transparent_down_nft6
             ;;
         nft)
-            if nft list table "ip $NFT_TABLE" >/dev/null 2>&1; then
-                run nft "delete table ip $NFT_TABLE"
-                log "Seffaf mod kurallari kaldirildi (nft)"
-            fi
+            _transparent_down_nft
+            [ "$v6" = '1' ] && _transparent_down_nft6
+            _transparent_down_iptables
+            _transparent_down_ip6tables
             ;;
-        none) : ;;
+        *)
+            # nothing recorded: clean everything that is reachable
+            _transparent_down_iptables
+            _transparent_down_ip6tables
+            _transparent_down_nft
+            _transparent_down_nft6
+            ;;
     esac
     return 0
 }

@@ -103,7 +103,7 @@ case "$name" in
             cat >"$1"
         fi
         ;;
-    iptables)
+    iptables|ip6tables)
         # `-C` probes whether a rule exists; report "missing" so the library
         # takes the add path. `-L` probes whether the chain exists -> 0.
         case " $* " in
@@ -126,7 +126,7 @@ STUB
     chmod +x "$dir/$name"
 }
 
-for stub in ciadpi resolvectl gsettings systemctl iptables nft ip ipset tee cp; do
+for stub in ciadpi resolvectl gsettings systemctl iptables ip6tables nft ip ipset tee cp; do
     write_stub "$STUB_BIN" "$stub"
 done
 # A PATH with nft only, so transparent mode falls back to the nft branch.
@@ -350,6 +350,9 @@ expected_dns() {
     check_has "transparent_up:port-return" "$trace" 'iptables -t nat -A GOODBYEDPI_TURKEY -p tcp -m tcp --dport 1080 -j RETURN'
     check_has "transparent_up:redirect" "$trace" 'iptables -t nat -A GOODBYEDPI_TURKEY -p tcp -j REDIRECT --to-ports 1080'
     check_has "transparent_up:output-hook" "$trace" 'iptables -t nat -A OUTPUT -j GOODBYEDPI_TURKEY'
+    # O2: IPv6 must be redirected too, otherwise IPv6 traffic bypasses ciadpi.
+    check_has "transparent_up:v6-redirect" "$trace" 'ip6tables -t nat -A GOODBYEDPI_TURKEY6 -p tcp -j REDIRECT --to-ports 1080'
+    check_has "transparent_up:v6-output-hook" "$trace" 'ip6tables -t nat -A OUTPUT -j GOODBYEDPI_TURKEY6'
 
     calls_reset
     transparent_down >/dev/null 2>&1
@@ -360,6 +363,9 @@ expected_dns() {
     check_has "transparent_down:unhook" "$trace" 'iptables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY'
     check_has "transparent_down:flush-chain" "$trace" 'iptables -t nat -F GOODBYEDPI_TURKEY'
     check_has "transparent_down:delete-chain" "$trace" 'iptables -t nat -X GOODBYEDPI_TURKEY'
+    # O2/O3: the IPv6 mirror is torn down as well, and teardown never aborts.
+    check_has "transparent_down:v6-unhook" "$trace" 'ip6tables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY6'
+    check_has "transparent_down:v6-delete-chain" "$trace" 'ip6tables -t nat -X GOODBYEDPI_TURKEY6'
 )
 
 (
