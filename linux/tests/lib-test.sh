@@ -422,6 +422,105 @@ expected_dns() {
 )
 
 # --------------------------------------------------------------------------
+# i — require_root and the sudo password-prompt problem
+#
+# The real sudo binary is NEVER reached: both cases put a stub `sudo` first in
+# PATH and that stub only records its argv. This matters — invoking the real
+# sudo here could ask for a password and charge the attempt to pam_faillock,
+# which is exactly the failure the library is meant to avoid.
+# `sudo -n true` is the cache probe; `sudo -E -- <script>` is the re-exec.
+# --------------------------------------------------------------------------
+
+SUDO_CACHED="$TMP/sudo-cached"
+SUDO_NOCACHE="$TMP/sudo-nocache"
+mkdir -p "$SUDO_CACHED" "$SUDO_NOCACHE"
+
+# write_sudo_stub <dir> — argv-logging sudo stub; the exit code of the `-n true`
+# cache probe is controlled by SUDO_STUB_PROBE_RC so one stub serves both cases.
+write_sudo_stub() {
+    cat >"$1/sudo" <<'STUB'
+#!/bin/bash
+# Test stub for sudo: records argv, never touches PAM.
+printf 'sudo %s\n' "$*" >>"${CALLS_LOG:-/dev/null}"
+case " $* " in
+    *' -n true '*) exit "${SUDO_STUB_PROBE_RC:-0}" ;;
+esac
+exit 0
+STUB
+    chmod +x "$1/sudo"
+}
+write_sudo_stub "$SUDO_CACHED"
+write_sudo_stub "$SUDO_NOCACHE"
+
+# A stand-in for the wrapper the user ran; never executed (sudo is stubbed).
+FAKE_WRAPPER="$TMP/turkey_dnsredir.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
+
+( # (a) cached credential: re-exec happens, no hint, no failure
+    DRY_RUN=0
+    SUDO_STUB_PROBE_RC=0
+    PATH="$SUDO_CACHED:$PATH"
+    export PATH SUDO_STUB_PROBE_RC
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+
+    calls_reset
+    out="$(require_root "$FAKE_WRAPPER" 2>&1)"
+    rc=$?
+    trace="$(calls)"
+
+    check_eq "require_root:cached-credential-rc" 0 "$rc"
+    check_has "require_root:cached-credential-reexec" "$trace" "sudo -E -- $FAKE_WRAPPER"
+    check_has_not "require_root:cached-credential-no-hint" "$out" 'faillock'
+)
+
+( # (b) no TTY and no cached credential: stop with instructions, never re-exec
+    DRY_RUN=0
+    SUDO_STUB_PROBE_RC=1
+    PATH="$SUDO_NOCACHE:$PATH"
+    export PATH SUDO_STUB_PROBE_RC
+
+    child="$TMP/no-tty-child.sh"
+    cat >"$child" <<'CHILD'
+#!/usr/bin/env bash
+# Sources the library and calls require_root with no controlling terminal.
+set -u
+# shellcheck source=/dev/null
+. "$1"
+require_root "$2"
+CHILD
+    chmod +x "$child"
+
+    out_file="$TMP/no-tty.out"
+    calls_reset
+    if setsid -w true 2>/dev/null; then
+        # </dev/null kills stdin, setsid drops the controlling terminal, so
+        # sudo would have nowhere to print a prompt.
+        setsid -w bash "$child" "$LIB_FILE" "$FAKE_WRAPPER" </dev/null >"$out_file" 2>&1
+        rc=$?
+    else
+        fail "require_root:no-tty-case-needs-setsid"
+        : >"$out_file"
+        rc=0
+    fi
+    out="$(cat "$out_file")"
+    trace="$(calls)"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "require_root:no-tty-nonzero-rc (rc=0)"
+    else
+        pass "require_root:no-tty-nonzero-rc"
+    fi
+    check_has "require_root:no-tty-hint-sudo-v" "$out" 'sudo -v'
+    check_has "require_root:no-tty-hint-faillock" "$out" 'faillock --user'
+    check_has "require_root:no-tty-hint-retry-command" "$out" "sudo -E -- $FAKE_WRAPPER"
+    check_has_not "require_root:no-tty-no-raw-password-error" "$out" 'a password is required'
+    check_has_not "require_root:no-tty-no-raw-tty-error" "$out" 'a terminal is required'
+    check_has "require_root:no-tty-cache-probe-only" "$trace" 'sudo -n true'
+    check_has_not "require_root:no-tty-no-sudo-E" "$trace" 'sudo -E'
+)
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 

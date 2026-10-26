@@ -111,9 +111,26 @@ require_linux() {
     [ "$(uname -s 2>/dev/null)" = "Linux" ] || die "Bu betik yalnizca Linux icin: uname -s -> $(uname -s 2>/dev/null)"
 }
 
+# _sudo_can_prompt — can sudo ask for a password in this context?
+# stdin itself is not enough: a desktop launcher or an agent terminal may have
+# stdin redirected while still owning a controlling terminal, and sudo reads
+# its prompt from /dev/tty, not from stdin.
+_sudo_can_prompt() {
+    [ -t 0 ] && return 0
+    [ -e /dev/tty ] || return 1
+    sh -c ': < /dev/tty' 2>/dev/null
+}
+
 # require_root "$0" — re-exec under sudo, preserving GOODBYEDPI_* env.
+#
+# A password prompt needs a terminal. When the wrapper is started from a pipe,
+# a launcher or any session without a controlling TTY, a blind `sudo -E` dies
+# with only a raw sudo error on screen — and each blind retry is charged to
+# pam_faillock, which locks the account for ~10 minutes after 3 failures. So
+# the no-prompt case is detected *before* any authentication attempt and is
+# answered with instructions instead.
 require_root() {
-    local script="${1:-$0}"
+    local script="${1:-$0}" user retry shown msg
     require_linux
     [ "$(id -u)" = "0" ] && return 0
     if [ "$DRY_RUN" = "1" ]; then
@@ -121,6 +138,32 @@ require_root() {
         return 0
     fi
     command -v sudo >/dev/null 2>&1 || die "root gerekli ve sudo bulunamadi: sudo $script"
+
+    if ! _sudo_can_prompt; then
+        # Without a terminal only an already cached credential can work.
+        # `sudo -n true` never prompts and is never charged as a failed
+        # authentication attempt, so it cannot add to a faillock lockout.
+        if ! sudo -n true 2>/dev/null; then
+            user="${USER:-}"
+            [ -n "$user" ] || user="$(id -un 2>/dev/null)"
+            shown="$script"
+            case "$shown" in *[[:space:]]*) shown="'$shown'" ;; esac
+            retry="sudo -E -- $shown"
+            msg=$(printf '%s\n' \
+                'root gerekiyor ama bu oturumda sudo sifre soramaz: terminal (TTY) yok.' \
+                'Bu yuzden hic sifre denemeden durdum; asagidaki adimlari uygulayin.' \
+                '' \
+                'Gercek bir terminal penceresinde su sirayla tekrar deneyin:' \
+                '  1) Bir terminal penceresi acin (gnome-terminal, konsole, xterm, sanal TTY...).' \
+                '  2) Sifrenizi bir kez girin ve kimligi onbellekte tutun:  sudo -v' \
+                "  3) Bu komutu o terminalde tekrar calistirin:  $retry" \
+                '' \
+                'Uyar: uste uste 3 hatali sifre denemesi hesabi ~10 dakika kilitler (pam_faillock).' \
+                "  Kilidi kontrol edin:  faillock --user $user" \
+                "  Kilidi sifirlayin:    faillock --user $user --reset")
+            die "$msg"
+        fi
+    fi
     log "Yetki yukseltiliyor: sudo -E $script $*"
     exec sudo -E -- "$script" "$@"
 }
