@@ -4,14 +4,21 @@ on:
   push:
     paths:
       - 'src/**'
+      - 'windows/**'
       - 'macos/**'
       - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'src/**'
+      - 'windows/**'
       - 'macos/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
+
+# This workflow runs repo-provided build code on pull_request, so the default
+# GITHUB_TOKEN scopes are far too broad for it. Least privilege: read-only.
+permissions:
+  contents: read
 
 env:
   WINDIVERT_URL: https://reqrypt.org/download/WinDivert-2.2.0-D.zip
@@ -23,7 +30,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # The token is not needed after checkout; persist-credentials would leave
+      # it in .git/config for every later (repo-provided) build step.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Declare short commit variable
         id: vars
@@ -62,11 +73,17 @@ jobs:
           mkdir goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
           cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x64/*.{dll,sys} goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
 
+      # The manifest is written inside the staged directory, so the existing
+      # directory artifact path picks it up without changing artifact names.
+      - name: Write SHA256 manifest x86_64
+        run: sha256sum goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}/* > goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}/SHA256SUMS
+
       - name: Upload output file x86_64
         uses: actions/upload-artifact@v4
         with:
           name: goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
           path: goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
+          retention-days: 14
 
       - name: Compile i686
         run: >
@@ -78,11 +95,15 @@ jobs:
           mkdir goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
           cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x86/*.{dll,sys} goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
 
+      - name: Write SHA256 manifest x86
+        run: sha256sum goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}/* > goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}/SHA256SUMS
+
       - name: Upload output file x86
         uses: actions/upload-artifact@v4
         with:
           name: goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
           path: goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
+          retention-days: 14
 
   build-macos:
     name: Build macOS (ciadpi)
@@ -94,6 +115,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Declare short commit variable
         id: vars
@@ -136,3 +159,4 @@ jobs:
         with:
           name: ${{ env.OUT }}
           path: ${{ env.OUT }}
+          retention-days: 14
