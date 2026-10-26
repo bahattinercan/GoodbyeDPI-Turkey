@@ -1,0 +1,18 @@
+[Unit]
+Description=GoodbyeDPI Turkey (byedpi/ciadpi DPI bypass proxy)
+Documentation=https://github.com/cagritaskn/GoodbyeDPI-Turkey
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@CIADPI@ @ARGS@
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
