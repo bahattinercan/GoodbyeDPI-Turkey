@@ -123,6 +123,26 @@ case "$name" in
             printf '%s\n' "$STUB_RESOLVECTL_STATUS"
         fi
         ;;
+    systemctl)
+        # `is-active --quiet` is the health-check probe; STUB_SYSTEMCTL_ACTIVE
+        # lets a test claim the unit never came up.
+        case " $* " in
+            *' is-active '*) exit "${STUB_SYSTEMCTL_ACTIVE:-0}" ;;
+        esac
+        ;;
+    ss)
+        # Nothing binds a socket in the sandbox, so the port is only reported
+        # as listening when the test asks for it (STUB_SS_LISTEN=1).
+        if [ "${STUB_SS_LISTEN:-0}" = '1' ]; then
+            printf 'State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n'
+            printf 'LISTEN 0      4096    127.0.0.1:1080      0.0.0.0:*\n'
+        fi
+        ;;
+    journalctl)
+        if [ -n "${STUB_JOURNAL_LINES:-}" ]; then
+            printf '%s\n' "$STUB_JOURNAL_LINES"
+        fi
+        ;;
     gsettings)
         if [ "${1:-}" = list-schemas ] && [ -n "${STUB_GSETTINGS_SCHEMA:-}" ]; then
             printf '%s\n' 'org.gnome.system.proxy'
@@ -134,7 +154,7 @@ STUB
     chmod +x "$dir/$name"
 }
 
-for stub in ciadpi resolvectl gsettings systemctl iptables ip6tables nft ip ipset tee cp; do
+for stub in ciadpi resolvectl gsettings systemctl iptables ip6tables nft ip ipset ss journalctl tee cp; do
     write_stub "$STUB_BIN" "$stub"
 done
 # A PATH with nft only, so transparent mode falls back to the nft branch.
@@ -266,6 +286,21 @@ expected_dns_legacy() {
     check_has_not "render_unit:caps-socks-no-net-admin" "$unit" 'CAP_NET_ADMIN'
     check_has_not "render_unit:no-args-placeholder" "$unit" '@ARGS@'
     check_has_not "render_unit:no-ciadpi-placeholder" "$unit" '@CIADPI@'
+
+    # The unit sandbox must keep the ExecStart binary readable. The repository
+    # lives under /home, and `ProtectHome=yes` hides /home from the unit, which
+    # killed the service with 203/EXEC + start-limit-hit.
+    check_has "unit:protecthome-read-only" "$unit" 'ProtectHome=read-only'
+    # line-exact: the explanatory comment above the key names the wrong value
+    if printf '%s\n' "$unit" | grep -qx 'ProtectHome=yes'; then
+        fail "unit:protecthome-not-yes (aktif anahtar hala ProtectHome=yes)"
+    else
+        pass "unit:protecthome-not-yes"
+    fi
+    check_has "unit:protecthome-comment" "$unit" 'ProtectHome=yes makes /home invisible'
+    check_has "unit:protectsystem-still-strict" "$unit" 'ProtectSystem=strict'
+    check_has "unit:no-new-privileges-kept" "$unit" 'NoNewPrivileges=yes'
+    check_has "unit:execstart-home-path-rendered" "$unit" "ExecStart=$CIADPI_BIN "
 )
 
 (
@@ -721,7 +756,7 @@ mkdir -p "$DECOY_DIR"
     cd "$DECOY_DIR" || exit 1
 
     calls_reset
-    start_ciadpi_foreground '*' >/dev/null 2>&1
+    STUB_SS_LISTEN=1 start_ciadpi_foreground '*' >/dev/null 2>&1
     rc=$?
     trace="$(calls)"
 
@@ -1256,6 +1291,9 @@ PATH="$2"
 export PATH
 STATE_DIR="$3"
 STATE_FILE="$STATE_DIR/prev-state.env"
+# The unit path must stay inside the sandbox: the default one is a real system
+# path and a live install there would make the teardown fail (or touch it).
+UNIT_PATH="$STATE_DIR/$UNIT_NAME.service"
 run_service_remove
 CHILD
     chmod +x "$child"
@@ -1349,6 +1387,117 @@ check_has "path:extra-entry-warns" "$path_case_out" '[!] PATH sabitlendi (root)'
 check_has "path:extra-entry-named" "$path_case_out" "/home/baris/tmpbin"
 check_has "path:extra-entry-rewritten" "$path_case_out" "final-path=$SAFE_PATH"
 check_has_not "path:extra-entry-no-secure-path-note" "$path_case_out" 'sudo secure_path'
+
+# --------------------------------------------------------------------------
+# t — a service that never comes up must fail the run, loudly
+#
+# `systemctl enable --now` returns 0 for a unit that dies immediately, e.g.
+# 203/EXEC when the unit sandbox (ProtectHome) hides the ExecStart binary. The
+# health check has to notice, print the journal and name the recovery command —
+# before the SOCKS proxy is applied on top of a dead port.
+# --------------------------------------------------------------------------
+
+HEALTH_BIN="$TMP/health-bin"
+mkdir -p "$HEALTH_BIN"
+# ciadpi that never listens: prints one bind error and exits, like a real
+# argument/bind failure (the one-shot health check consumes this stub).
+cat >"$HEALTH_BIN/ciadpi" <<'STUB'
+#!/bin/bash
+printf 'ciadpi %s\n' "$*" >>"${CALLS_LOG:-/dev/null}"
+printf 'error: cannot bind 127.0.0.1:1080: Address already in use\n' >&2
+exit 1
+STUB
+chmod +x "$HEALTH_BIN/ciadpi"
+
+( # healthy unit: active and listening, so the install may continue
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    STUB_SYSTEMCTL_ACTIVE=0
+    STUB_SS_LISTEN=1
+    export STUB_SYSTEMCTL_ACTIVE STUB_SS_LISTEN
+
+    out="$(_gdt_service_health_check "$UNIT_NAME" 2>&1)"
+    rc=$?
+    check_eq "service-health:healthy-rc" 0 "$rc"
+    check_has "service-health:healthy-log" "$out" "Servis aktif ve dinliyor: $UNIT_NAME"
+)
+
+( # unit inactive/failed: run_method_service_install must exit non-zero
+    child="$TMP/service-install-child.sh"
+    cat >"$child" <<'CHILD'
+#!/bin/bash
+# Stands in for service_install_dnsredir_turkey.sh. systemctl/ciadpi are stubs,
+# so nothing is installed, started or applied to the live session.
+set -euo pipefail
+. "$1"
+PATH="$2"
+export PATH
+UNIT_PATH="$3"
+STATE_DIR="$4"
+STATE_FILE="$STATE_DIR/prev-state.env"
+run_method_service_install alt6
+CHILD
+    chmod +x "$child"
+
+    svc_dir="$TMP/service-install"
+    mkdir -p "$svc_dir/etc"
+    out_file="$TMP/service-install.out"
+    calls_reset
+    SUDO_USER='baris' \
+    STUB_IP_ROUTE='default via 192.168.1.1 dev eth9' \
+    STUB_SYSTEMCTL_ACTIVE=1 \
+    STUB_JOURNAL_LINES='goodbyedpi-turkey.service: Failed to locate executable /home/u/repo/linux/bin/ciadpi: No such file or directory' \
+    GOODBYEDPI_DNS=off \
+        bash "$child" "$LIB_FILE" "$ROOT_BIN:$STUB_BIN:/usr/bin:/bin" \
+        "$svc_dir/etc/goodbyedpi-turkey.service" "$svc_dir/state" >"$out_file" 2>&1
+    rc=$?
+    out="$(cat "$out_file")"
+    trace="$(calls)"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "service-health:nonzero-rc (rc=0)"
+    else
+        pass "service-health:nonzero-rc"
+    fi
+    check_has "service-health:error-headline" "$out" 'Servis saglik kontrolu basarisiz'
+    check_has "service-health:names-protecthome" "$out" 'ProtectHome'
+    check_has "service-health:names-203-exec" "$out" '203/EXEC'
+    check_has "service-health:names-cap-net-raw" "$out" 'CAP_NET_RAW'
+    check_has "service-health:names-port-in-use" "$out" 'portu baska bir surec tarafindan kullaniliyor'
+    check_has "service-health:recovery-command" "$out" 'sudo ./scripts/service_remove.sh'
+    check_has "service-health:journal-printed" "$out" 'Failed to locate executable'
+    check_has "service-health:journal-consulted" "$trace" "journalctl -u $UNIT_NAME -n 20 --no-pager"
+    check_has_not "service-health:no-success-log" "$out" 'Servis kuruldu:'
+    # the proxy must not be applied on top of a dead unit
+    check_has_not "service-health:no-proxy-write" "$trace" 'gsettings set'
+)
+
+# --------------------------------------------------------------------------
+# u — the one-shot path never claims success when ciadpi is not listening
+# --------------------------------------------------------------------------
+
+( # ciadpi dies at once: the port never opens, so the run must stop non-zero
+    DRY_RUN=0
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    CIADPI_BIN="$HEALTH_BIN/ciadpi"
+
+    out="$(start_ciadpi_foreground --bogus 2>&1)"
+    rc=$?
+
+    if [ "$rc" -eq 0 ]; then
+        fail "oneshot-health:nonzero-rc (rc=0)"
+    else
+        pass "oneshot-health:nonzero-rc"
+    fi
+    check_has "oneshot-health:error-headline" "$out" 'ciadpi baslatilamadi'
+    check_has "oneshot-health:shows-child-stderr" "$out" 'cannot bind 127.0.0.1:1080'
+    check_has "oneshot-health:names-port-in-use" "$out" 'portu baska bir surec tarafindan kullaniliyor'
+    check_has "oneshot-health:mentions-recovery" "$out" 'sudo ./scripts/service_remove.sh'
+    check_has_not "oneshot-health:no-listening-log" "$out" 'ciadpi dinliyor'
+)
 
 
 passed=$(grep -c '^ok ' "$RESULTS" 2>/dev/null || true)

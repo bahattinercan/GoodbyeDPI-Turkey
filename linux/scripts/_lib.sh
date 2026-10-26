@@ -1070,24 +1070,153 @@ install_cleanup_trap() {
     trap 'exit 143' TERM
 }
 
+# _gdt_port_listening — 0 when something listens on $CIADPI_PORT, 1 when
+# nothing does, 2 when the question cannot be answered here (no `ss`). A
+# proxy that is configured but not listening is exactly the state the browser
+# reports as "Vekil sunucu baglantiyi kabul etmiyor", so the callers below
+# must never treat "unknown" as "fine" silently: 2 is warned about once.
+_gdt_port_listening() {
+    local out=""
+    command -v ss >/dev/null 2>&1 || return 2
+    out=$(_capture ss -ltn)
+    [ -n "$out" ] || return 1
+    # grep reads to EOF (no -q) so `ss` is never killed by SIGPIPE under
+    # `set -o pipefail`. The port is matched as a field: `:1080 ` never
+    # matches `:10800 `.
+    if printf '%s\n' "$out" | grep -E "[:.]$CIADPI_PORT[[:space:]]" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# _gdt_wait_for_ciadpi <pid> <tries> <sleep> — 0 once the port listens, 1 when
+# the child died or the port never opened inside the budget.
+_gdt_wait_for_ciadpi() {
+    local pid="${1:-}" tries="${2:-12}" nap="${3:-0.25}" i=0
+    while [ "$i" -lt "$tries" ]; do
+        if _gdt_port_listening; then
+            return 0
+        fi
+        # A dead child will never open the port; stop burning the budget.
+        [ "$pid" = "" ] || kill -0 "$pid" 2>/dev/null || return 1
+        i=$((i + 1))
+        if [ "$i" -lt "$tries" ]; then
+            sleep "$nap"
+        fi
+    done
+    # The last iteration already probed the port, so nothing opened it.
+    return 1
+}
+
+# _gdt_fail_ciadpi_start <pid> <stderr-file> — one-shot startup failed. The
+# SOCKS proxy is already applied at this point, so silence would leave the user
+# with a browser error and no clue: show ciadpi's own words and stop.
+_gdt_fail_ciadpi_start() {
+    local pid="${1:-}" errfile="${2:-}" child_err="" msg
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    if [ -n "$errfile" ] && [ -s "$errfile" ]; then
+        child_err=$(tail -n 5 "$errfile" 2>/dev/null || true)
+    fi
+    if [ -n "$child_err" ]; then
+        err "ciadpi cikti: $child_err"
+    fi
+    if [ -n "$errfile" ]; then
+        rm -f "$errfile" 2>/dev/null
+    fi
+    msg=$(printf '%s\n' \
+        "ciadpi baslatilamadi: $CIADPI_HOST:$CIADPI_PORT portunu dinlemiyor (surec yasamiyor)." \
+        'Muhtemel nedenler:' \
+        '  1) Gecersiz desync argumani (--split/--disorder/--tlsrec) ya da ciadpi derlemesi eksik.' \
+        "  2) $CIADPI_PORT portu baska bir surec tarafindan kullaniliyor (ss -ltn | grep $CIADPI_PORT)." \
+        '  3) --fake / --md5sig icin CAP_NET_RAW yok; root olarak calistirilmadi.' \
+        'Temizlik: pgrep -a ciadpi ile kalan surecleri kontrol edin; servis modu icin: sudo ./scripts/service_remove.sh')
+    die "$msg"
+}
+
 # start_ciadpi_foreground <args...> — background + wait (no exec) so the EXIT
 # trap still restores state. ciadpi itself is started directly because a
 # background job's pid (needed for signal forwarding) cannot come from `run`.
 start_ciadpi_foreground() {
-    local rc=0 pid=""
+    local rc=0 pid="" errfile="" port_rc=0
     require_ciadpi
     if [ "$DRY_RUN" = "1" ]; then
         run "$CIADPI_BIN" --ip "$CIADPI_HOST" --port "$CIADPI_PORT" "$@"
         return 0
     fi
-    "$CIADPI_BIN" --ip "$CIADPI_HOST" --port "$CIADPI_PORT" "$@" &
+    # ciadpi's stderr is kept so a startup failure can quote it instead of
+    # ending as a silent "proxy applied but nothing listens".
+    errfile=$(mktemp "${TMPDIR:-/tmp}/goodbyedpi-turkey.err.XXXXXX") \
+        || die "ciadpi hata ciktisi icin gecici dosya olusturulamadi"
+    "$CIADPI_BIN" --ip "$CIADPI_HOST" --port "$CIADPI_PORT" "$@" 2>"$errfile" &
     pid=$!
     log "ciadpi calisiyor: pid=$pid, $CIADPI_HOST:$CIADPI_PORT"
     trap 'kill -TERM "$pid" 2>/dev/null || true' INT TERM
+
+    _gdt_port_listening || port_rc=$?
+    if [ "$port_rc" = '2' ]; then
+        warn "port kontrolu atlandi: 'ss' bulunamadi (iproute2 paketini kurun)"
+    elif ! _gdt_wait_for_ciadpi "$pid" 12 0.25; then
+        _gdt_fail_ciadpi_start "$pid" "$errfile"
+    else
+        log "ciadpi dinliyor: $CIADPI_HOST:$CIADPI_PORT"
+    fi
+
+    rc=0
     wait "$pid" || rc=$?
     wait "$pid" 2>/dev/null || true
     trap - INT TERM
+    rm -f "$errfile" 2>/dev/null
     return "$rc"
+}
+
+# _gdt_service_health_check <unit> — `systemctl enable --now` returns 0 even
+# when the unit dies immediately (203/EXEC: ExecStart hidden by the sandbox, a
+# bind failure, a missing capability). The proxy is applied only after this, so
+# an unchecked failure used to leave GNOME pointed at a dead port and the
+# browser saying "Vekil sunucu baglantiyi kabul etmiyor".
+_gdt_service_health_check() {
+    local unit="${1:-$UNIT_NAME}" i=0 tries=10 port_rc=0 msg
+    # DRY_RUN never starts anything, so there is nothing to verify.
+    if [ "$DRY_RUN" = '1' ]; then
+        return 0
+    fi
+
+    _gdt_port_listening || port_rc=$?
+    if [ "$port_rc" = '2' ]; then
+        warn "port kontrolu atlandi: 'ss' bulunamadi (iproute2 paketini kurun)"
+    fi
+
+    while [ "$i" -lt "$tries" ]; do
+        if systemctl is-active --quiet "$unit"; then
+            if [ "$port_rc" = '2' ]; then
+                log "Servis aktif: $unit (port kontrolu yapilamadi)"
+                return 0
+            fi
+            if _gdt_port_listening; then
+                log "Servis aktif ve dinliyor: $unit ($CIADPI_HOST:$CIADPI_PORT)"
+                return 0
+            fi
+        fi
+        i=$((i + 1))
+        if [ "$i" -lt "$tries" ]; then
+            sleep 0.5
+        fi
+    done
+
+    err "Servis saglik kontrolu basarisiz: $unit aktif degil ya da $CIADPI_HOST:$CIADPI_PORT dinlenmiyor."
+    err 'Son journal satirlari:'
+    run journalctl -u "$unit" -n 20 --no-pager || true
+    msg=$(printf '%s\n' \
+        "Servis kuruldu ama calismadi: $unit aktif degil ya da $CIADPI_PORT portunu dinlemiyor." \
+        'Muhtemel nedenler:' \
+        '  1) ExecStart ikilisi servis sandbox icinde gorunmuyor: unit icindeki ProtectHome ikiliyi /home altinda gizliyor (203/EXEC, start-limit-hit). Sablonda ProtectHome=read-only olmali.' \
+        '  2) --fake / --md5sig icin gereken CAP_NET_RAW verilmemis (AmbientCapabilities).' \
+        "  3) $CIADPI_PORT portu baska bir surec tarafindan kullaniliyor (ss -ltn | grep $CIADPI_PORT)." \
+        'Geri almak icin: sudo ./scripts/service_remove.sh')
+    die "$msg"
 }
 
 # --------------------------------------------------------------------------
@@ -1186,6 +1315,8 @@ run_method_service_install() {
     render_unit "$UNIT_NAME" "$CIADPI_BIN" "${argv[@]}" | _write_file "$UNIT_PATH"
     run systemctl daemon-reload
     run systemctl enable --now "$UNIT_NAME"
+    # never apply the proxy on top of a unit that is not actually listening
+    _gdt_service_health_check "$UNIT_NAME"
 
     log_dns_policy "$mode"
     [ "$mode" = 'yandex' ] && _gdt_mark_dns_applied

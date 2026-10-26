@@ -16,7 +16,10 @@ CapabilityBoundingSet=CAP_NET_RAW
 NoNewPrivileges=yes
 LimitNOFILE=4096
 ProtectSystem=strict
-ProtectHome=yes
+# ProtectHome=yes makes /home invisible inside the unit's mount namespace, so an
+# ExecStart binary under /home dies with 203/EXEC (start-limit-hit). ciadpi only
+# reads its own binary and writes nothing, so read-only is enough.
+ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes

@@ -123,6 +123,18 @@ DRY_RUN=1 ./scripts/turkey_dnsredir.sh
 
 ## Sorun giderme
 
+- **Servis `status=203/EXEC` / `start-limit-hit` ile ölüyor:** ExecStart'taki `ciadpi` ikilisi unit'in sandbox'ı içinden
+  erişilemez demektir. `ProtectHome=yes` `/home` dizinini servis için tamamen görünmez yapar; depo `linux/bin/ciadpi`
+  genelde `/home` altında olduğu için süreç hiç başlamaz (`Unable to locate executable`, `203/EXEC`, ardından
+  `start-limit-hit`). Şablonda artık `ProtectHome=read-only` yazıyor: ikili okunur, yazma izni yok. Eski unit ile
+  karşılaşırsan `sudo ./scripts/service_remove.sh` çalıştırıp kurulumu tekrarla; `systemctl cat goodbyedpi-turkey`
+  çıktısında `ProtectHome=read-only` görmelisin.
+- **Tarayıcı "Vekil sunucu bağlantıyı kabul etmiyor" diyor (Firefox/Chrome):** proxy (GNOME) uygulanmış ama `ciadpi`
+  dinlemiyor demektir; bu yüzden tarayıcı ölü bir porta gider. Kurulum artık bunu fark eder: servis aktif olmazsa ya da
+  `1080` portu dinlenmezse son 20 journal satırını basar ve sıfırdan farklı çıkış koduyla durur (başarı taklidi yok).
+  Kontrol: `systemctl status goodbyedpi-turkey`, `journalctl -u goodbyedpi-turkey -n 30`, `ss -ltn | grep 1080`,
+  `pgrep -a ciadpi`. Temizlik: `sudo ./scripts/service_remove.sh`.
+
 - **`--md5sig` desteklenmiyor / bağlantı hiç açılmıyor:** çekirdek bu tekniği kabul etmiyor olabilir. Argümanları
   `GOODBYEDPI_ARGS` ile ez: `sudo GOODBYEDPI_ARGS='--split 1+s --disorder 3+s' ./scripts/turkey_dnsredir.sh`.
 - **`ciadpi bulunamadı`:** henüz derlememişsin. `cd linux && ./build.sh` çalıştır.
