@@ -118,6 +118,15 @@ GoodbyeDPI Türkiye fork'unu batch dosyasını çalıştırarak kullanmak için 
 > [!NOTE]
 > ``turkey_dnsredir.cmd`` dosyasını yönetici olarak çalıştırdığınızda GoodbyeDPI aktif olacaktır. Ancak bu yöntemle çalıştırıldığında hem bilgisayarınız yeniden başlatıldığında GoodbyeDPI'ı elle açmanız gerekecek, hem de ``turkey_dnsredir.cmd`` ile açılan pencere kapatıldığında GoodbyeDPI deaktive olacaktır.
 
+**Güvenlik notları (Windows)**
+
+- **Kurulum klasörü:** ZIP'i yönetici-yazılabilir bir klasöre çıkarın (örneğin ``C:\Program Files\GoodbyeDPI``). İndirilenler veya Masaüstü gibi kullanıcı-yazılabilir konumlardan hizmet kurmayın: hizmet **LocalSystem** hesabıyla çalıştığı için ``goodbyedpi.exe`` dosyasını sonradan değiştirebilen herkes SYSTEM yetkisi elde eder.
+- **Klasör izinleri:** yönetici komut isteminde ``icacls "C:\Program Files\GoodbyeDPI" /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" "Users:(OI)(CI)RX"`` komutunu çalıştırın; kalıtımı kapatıp yalnızca yönetici, SYSTEM ve okuma-yürütme izni bırakır.
+- **WinDivert:** ``WinDivert.dll`` ve ``WinDivert64.sys`` aynı klasörden yüklendiği için klasör yazılabilir olmamalıdır.
+- **DNS:** Ön ayarların 5'i varsayılan olarak Yandex DNS'e (77.88.8.8 / 77.88.8.1) yönlendirir; bu üçüncü taraf ve düz metin bir çözümleyicidir. İstemezseniz ilgili ``.cmd`` dosyasındaki ``--dns-addr 77.88.8.8 --dns-port 1253`` kısmını (ve varsa IPv6 karşılığını) silin.
+- **Bütünlük:** ``certutil -hashfile goodbyedpi.exe SHA256`` çıktısını sürüm notundaki veya ``SHA256SUMS`` dosyasındaki değerle karşılaştırın.
+- **Antivirüs:** Programı kaldırmak yerine GoodbyeDPI klasörünü istisnaya ekleyin ve dosya hash'ini doğrulayın.
+
 ## GoodbyeDPI'ı Kaldırmak ve DNS Ayarlarını Eski Haline Getirmek
 
 GoodbyeDPI'ı tamamen kapatmak ve silmek, bununla birlikte DNS atamasını kaldırmak için **[bu rehberi](https://github.com/cagritaskn/GoodbyeDPI-Turkey/blob/master/REVERT.md)** takip edebilirsiniz.

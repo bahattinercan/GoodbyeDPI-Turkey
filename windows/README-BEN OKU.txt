@@ -11,6 +11,16 @@ Virüs & Veri Sızıntısı & Bitcoin Mining
 Program açık kaynak kodlu olduğundan tüm kodu görüp inceleyebilirsiniz. Bazı kullanıcılar VirusTotal'de false positive bildirimi yapsa da bu WinDivert.dll ve WinDivert64.sys dosyalarının fonksiyonlarından dolayı bu şekilde yanlış bir sonuç verebiliyor (bu dosyalar sistemi etkiler). Bu .dll ve .sys dosyaları da açık kaynak kodludur ve incelenebilir, yani tamamen temizdir. İstemeyen ve güvenmeyen kullanıcılar kullanmak zorunda değildir, herkesin kendi seçimidir. Dilerseniz tüm klasörü ya da .zip dosyasını VirusTotal gibi bir sitede taratıp sonuçları inceleyebilirsiniz.
 
 
+Güvenlik notları
+
+1. ZIP dosyasını yönetici-yazılabilir bir klasöre çıkarın; örneğin C:\Program Files\GoodbyeDPI. İndirilenler veya Masaüstü gibi kullanıcı-yazılabilir konumlardan hizmet kurmayın: hizmet LocalSystem hesabıyla çalıştığı için goodbyedpi.exe dosyasını sonradan değiştirebilen herkes SYSTEM yetkisi elde eder.
+2. Klasör izinlerini yönetici komut isteminde aşağıdaki tek komutla sıkılaştırın:
+   icacls "C:\Program Files\GoodbyeDPI" /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" "Users:(OI)(CI)RX"
+3. WinDivert.dll ve WinDivert64.sys dosyaları da aynı klasörden yüklendiği için bu klasör yazılabilir olmamalıdır. Klasör yazılabilirse yetki yükseltme riski doğar.
+4. DNS: Bu forktaki 7 ön ayarın 5'i varsayılan olarak Yandex DNS'e (77.88.8.8 / 77.88.8.1, IPv6 2a02:6b8::feed:0ff) yönlendirir; bu üçüncü taraf ve düz metin bir çözümleyicidir. Kullanmak istemezseniz ilgili .cmd dosyasındaki --dns-addr 77.88.8.8 --dns-port 1253 kısmını (ve varsa IPv6 karşılığını) silin; Windows DNS ayarlarınızı değiştirmeniz gerekmez.
+5. İndirdiğiniz sürümün bütünlüğünü doğrulayın: certutil -hashfile goodbyedpi.exe SHA256 çıktısını sürüm notundaki veya SHA256SUMS dosyasındaki değerle karşılaştırın.
+6. Antivirüs: Programı kaldırmak yerine GoodbyeDPI klasörünü istisnaya ekleyin ve dosya hash'ini doğrulayın. (Yukarıdaki Kaspersky notu bu konudaki özel durumu açıklar.)
+
 GoodbyeDPI'ı Kullanmak
 GoodbyeDPI'ın Türkiye fork'unu kullanmak için iki yöntem bulunmaktadır.
 
