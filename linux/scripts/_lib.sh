@@ -48,6 +48,25 @@ esac
 _GDT_STATE_BODY=""
 
 # --------------------------------------------------------------------------
+# Environment hardening
+# --------------------------------------------------------------------------
+
+# Everything this library creates is private by default: the state file and
+# the rendered unit carry the saved proxy/DNS snapshot and the desync
+# arguments, so they must never be world-readable, not even between creation
+# and a later chmod.
+umask 077
+
+# Fixed command lookup order for privileged code. `sudo -E` used to hand root
+# the caller's PATH, so every bare `tee`/`rm`/`cp`/`chmod`/`mv`/`systemctl`
+# below could resolve through a caller-owned directory (root code execution).
+_GDT_SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Environment variables kept across the sudo re-exec: the documented knobs and
+# DRY_RUN, nothing else. `-E` would preserve all of the caller's environment.
+_GDT_SUDO_KEEP="DRY_RUN,GOODBYEDPI_ARGS,GOODBYEDPI_PROXY_MODE,GOODBYEDPI_DNS"
+
+# --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
 
@@ -61,6 +80,16 @@ log()  { printf '%s[i]%s %s\n' "$_C_INFO" "$_C_OFF" "$*" >&2; }
 warn() { printf '%s[!]%s %s\n' "$_C_WARN" "$_C_OFF" "$*" >&2; }
 err()  { printf '%s[x]%s %s\n' "$_C_ERR" "$_C_OFF" "$*" >&2; }
 die()  { err "$*"; exit 1; }
+
+# Root only: force the fixed lookup order, because only root's lookups can be
+# turned into root code execution. An unprivileged run keeps the caller PATH —
+# that is where a dry-run wrapper or the stub-based test suite keeps its
+# shadowed commands.
+if [ "$(id -u)" = "0" ] && [ "${PATH:-}" != "$_GDT_SAFE_PATH" ]; then
+    warn "PATH sabitlendi (root): '${PATH:-}' yerine '$_GDT_SAFE_PATH'"
+    PATH="$_GDT_SAFE_PATH"
+fi
+export PATH
 
 # --------------------------------------------------------------------------
 # Command execution
@@ -148,7 +177,7 @@ require_root() {
             [ -n "$user" ] || user="$(id -un 2>/dev/null)"
             shown="$script"
             case "$shown" in *[[:space:]]*) shown="'$shown'" ;; esac
-            retry="sudo -E -- $shown"
+            retry="sudo --preserve-env=$_GDT_SUDO_KEEP -- $shown"
             msg=$(printf '%s\n' \
                 'root gerekiyor ama bu oturumda sudo sifre soramaz: terminal (TTY) yok.' \
                 'Bu yuzden hic sifre denemeden durdum; asagidaki adimlari uygulayin.' \
@@ -164,8 +193,8 @@ require_root() {
             die "$msg"
         fi
     fi
-    log "Yetki yukseltiliyor: sudo -E $script $*"
-    exec sudo -E -- "$script" "$@"
+    log "Yetki yukseltiliyor: sudo --preserve-env=$_GDT_SUDO_KEEP -- $script $*"
+    exec sudo --preserve-env="$_GDT_SUDO_KEEP" -- "$script" "$@"
 }
 
 require_ciadpi() {
@@ -299,6 +328,7 @@ save_state() {
         resolv_bak="$STATE_DIR/resolv.conf.bak"
         if [ ! -f "$resolv_bak" ]; then
             run mkdir -p "$STATE_DIR"
+            run chmod 700 "$STATE_DIR"
             run cp -p /etc/resolv.conf "$resolv_bak"
         else
             log "Mevcut resolv.conf yedegi korunuyor: $resolv_bak"
@@ -332,8 +362,12 @@ EOF
 )
     _GDT_STATE_BODY="$body"
     run mkdir -p "$STATE_DIR"
-    printf '%s\n' "$body" | _write_file "$STATE_FILE"
-    run chmod 600 "$STATE_FILE"
+    run chmod 700 "$STATE_DIR"
+    # Write to a sibling and rename: the final path is never readable with a
+    # wider mode, not even for the instant between create and chmod.
+    printf '%s\n' "$body" | _write_file "$STATE_FILE.tmp"
+    run chmod 600 "$STATE_FILE.tmp"
+    run mv -f "$STATE_FILE.tmp" "$STATE_FILE"
     log "Durum kaydedildi: $STATE_FILE (arayuz=$iface, dns=$dns_backend, proxy=$proxy_backend)"
 }
 
@@ -686,6 +720,7 @@ render_unit() {
 
 run_method_oneshot() {
     local method="${1:-default}" args mode iface
+    local argv=()
     require_linux
     require_root "$0"
     require_ciadpi
@@ -703,12 +738,15 @@ run_method_oneshot() {
     fi
 
     log "Yontem: $method (dns=$mode, proxy=$PROXY_MODE, arayuz=$iface)"
-    # shellcheck disable=SC2086
-    start_ciadpi_foreground $args
+    # method_args returns one string; split it into argv exactly once so the
+    # desync arguments reach ciadpi literally (no globbing).
+    read -r -a argv <<< "$args"
+    start_ciadpi_foreground "${argv[@]}"
 }
 
 run_method_service_install() {
     local method="${1:-default}" args mode iface
+    local argv=()
     require_linux
     require_root "$0"
     require_ciadpi
@@ -730,8 +768,9 @@ run_method_service_install() {
         save_state "$iface"
     fi
 
-    # shellcheck disable=SC2086
-    render_unit "$UNIT_NAME" "$CIADPI_BIN" $args | _write_file "$UNIT_PATH"
+    # same single argv split as the one-shot path: no globbing
+    read -r -a argv <<< "$args"
+    render_unit "$UNIT_NAME" "$CIADPI_BIN" "${argv[@]}" | _write_file "$UNIT_PATH"
     run systemctl daemon-reload
     run systemctl enable --now "$UNIT_NAME"
 

@@ -428,7 +428,8 @@ expected_dns() {
 # PATH and that stub only records its argv. This matters — invoking the real
 # sudo here could ask for a password and charge the attempt to pam_faillock,
 # which is exactly the failure the library is meant to avoid.
-# `sudo -n true` is the cache probe; `sudo -E -- <script>` is the re-exec.
+# `sudo -n true` is the cache probe; `sudo --preserve-env=<list> -- <script>`
+# is the re-exec (an explicit allow-list, never `-E`).
 # --------------------------------------------------------------------------
 
 SUDO_CACHED="$TMP/sudo-cached"
@@ -452,6 +453,14 @@ STUB
 write_sudo_stub "$SUDO_CACHED"
 write_sudo_stub "$SUDO_NOCACHE"
 
+# The re-exec keeps an explicit allow-list instead of the whole environment;
+# read the list from the library so the assertion cannot drift from the code.
+SUDO_KEEP="$(
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    printf '%s' "$_GDT_SUDO_KEEP"
+)"
+
 # A stand-in for the wrapper the user ran; never executed (sudo is stubbed).
 FAKE_WRAPPER="$TMP/turkey_dnsredir.sh"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
@@ -470,7 +479,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
     trace="$(calls)"
 
     check_eq "require_root:cached-credential-rc" 0 "$rc"
-    check_has "require_root:cached-credential-reexec" "$trace" "sudo -E -- $FAKE_WRAPPER"
+    check_has "require_root:cached-credential-reexec" "$trace" "sudo --preserve-env=$SUDO_KEEP -- $FAKE_WRAPPER"
+    check_has_not "require_root:cached-credential-no-sudo-E" "$trace" 'sudo -E'
     check_has_not "require_root:cached-credential-no-hint" "$out" 'faillock'
 )
 
@@ -513,7 +523,7 @@ CHILD
     fi
     check_has "require_root:no-tty-hint-sudo-v" "$out" 'sudo -v'
     check_has "require_root:no-tty-hint-faillock" "$out" 'faillock --user'
-    check_has "require_root:no-tty-hint-retry-command" "$out" "sudo -E -- $FAKE_WRAPPER"
+    check_has "require_root:no-tty-hint-retry-command" "$out" "sudo --preserve-env=$SUDO_KEEP -- $FAKE_WRAPPER"
     check_has_not "require_root:no-tty-no-raw-password-error" "$out" 'a password is required'
     check_has_not "require_root:no-tty-no-raw-tty-error" "$out" 'a terminal is required'
     check_has "require_root:no-tty-cache-probe-only" "$trace" 'sudo -n true'
