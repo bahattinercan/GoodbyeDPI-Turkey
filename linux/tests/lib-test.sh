@@ -33,6 +33,15 @@ export CALLS_LOG="$TMP/calls.log"
 # --------------------------------------------------------------------------
 # Assertion helpers — all of them use shell builtins only, so they also work
 # in the sub-shell where PATH points at a single stub directory.
+#
+# Every assertion group lives in a `( ... )` subshell, which is what keeps
+# `set -u` aborts, `exit` and stray state from leaking into the next group. The
+# flip side is that a subshell which dies records nothing, so a broken group
+# used to look green: `set -u` hit one unbound variable and the remaining
+# assertions in that block simply never ran. Each block therefore ends with a
+# `blocks:<group>:block-complete` line and the closing parenthesis carries
+# `|| fail "blocks:<group>:block-aborted"`. An abort now costs one loud
+# failure instead of silence. Keep both halves when adding a group.
 # --------------------------------------------------------------------------
 
 pass() {
@@ -262,7 +271,8 @@ expected_dns_legacy() {
     check_has "log_dns_policy:yandex-warning-mentions-off" "$(log_dns_policy yandex 2>&1)" 'GOODBYEDPI_DNS=off'
     check_has "log_dns_policy:yandex-warning-mentions-plaintext" "$(log_dns_policy yandex 2>&1)" 'duz metin DNS'
     check_eq "log_dns_policy:yandex-no-log-line" '' "$(log_dns_policy yandex 2>/dev/null)"
-)
+    pass "blocks:methods:block-complete"
+) || fail "blocks:methods:block-aborted"
 
 # --------------------------------------------------------------------------
 # d — render_unit
@@ -301,7 +311,8 @@ expected_dns_legacy() {
     check_has "unit:protectsystem-still-strict" "$unit" 'ProtectSystem=strict'
     check_has "unit:no-new-privileges-kept" "$unit" 'NoNewPrivileges=yes'
     check_has "unit:execstart-home-path-rendered" "$unit" "ExecStart=$CIADPI_BIN "
-)
+    pass "blocks:unit-render:block-complete"
+) || fail "blocks:unit-render:block-aborted"
 
 (
     PROXY_MODE=transparent
@@ -314,7 +325,8 @@ expected_dns_legacy() {
     check_has "render_unit:transparent-caps" "$unit" 'AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN'
     check_has "render_unit:transparent-bound" "$unit" 'CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN'
     check_has "render_unit:transparent-args" "$unit" '"--fake"'
-)
+    pass "blocks:unit-transparent:block-complete"
+) || fail "blocks:unit-transparent:block-aborted"
 
 # --------------------------------------------------------------------------
 # e — DRY_RUN=1 is a side-effect free preview
@@ -352,7 +364,8 @@ expected_dns_legacy() {
     else
         pass "dry-run:no-state-file"
     fi
-)
+    pass "blocks:dry-run:block-complete"
+) || fail "blocks:dry-run:block-aborted"
 
 # --------------------------------------------------------------------------
 # f — save_state / restore_state round-trip (real sandbox files, stub commands)
@@ -447,7 +460,8 @@ expected_dns_legacy() {
     calls_reset
     restore_state >/dev/null 2>&1
     check_has "mark_dns_applied:teardown-reverts-dns" "$(calls)" 'resolvectl flush-caches'
-)
+    pass "blocks:state-roundtrip:block-complete"
+) || fail "blocks:state-roundtrip:block-aborted"
 
 # --------------------------------------------------------------------------
 # g — transparent_up / transparent_down (iptables and nft branches)
@@ -487,7 +501,8 @@ expected_dns_legacy() {
     # O2/O3: the IPv6 mirror is torn down as well, and teardown never aborts.
     check_has "transparent_down:v6-unhook" "$trace" 'ip6tables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY6'
     check_has "transparent_down:v6-delete-chain" "$trace" 'ip6tables -t nat -X GOODBYEDPI_TURKEY6'
-)
+    pass "blocks:transparent-iptables:block-complete"
+) || fail "blocks:transparent-iptables:block-aborted"
 
 (
     DRY_RUN=0
@@ -519,7 +534,8 @@ expected_dns_legacy() {
     down_trace="$(calls)"
     check_has "transparent_down-nft:delete-table" "$down_trace" 'nft delete table ip goodbyedpi_turkey'
     check_has "transparent_down-nft:v6-delete-table" "$down_trace" 'nft delete table ip6 goodbyedpi_turkey6'
-)
+    pass "blocks:transparent-nft:block-complete"
+) || fail "blocks:transparent-nft:block-aborted"
 
 # --------------------------------------------------------------------------
 # h — backend detection returns documented values
@@ -540,7 +556,8 @@ expected_dns_legacy() {
         none | environmentd | gsettings) pass "detect_proxy_backend:documented-value ($proxy_backend)" ;;
         *) fail "detect_proxy_backend:documented-value (gelen: [$proxy_backend])" ;;
     esac
-)
+    pass "blocks:backend-table:block-complete"
+) || fail "blocks:backend-table:block-aborted"
 
 (
     STUB_RESOLVECTL_STATUS='Global'
@@ -551,7 +568,8 @@ expected_dns_legacy() {
 
     check_eq "detect_dns_backend:resolved" 'resolved' "$(detect_dns_backend)"
     check_eq "detect_proxy_backend:gsettings" 'gsettings' "$(detect_proxy_backend)"
-)
+    pass "blocks:backend-detect:block-complete"
+) || fail "blocks:backend-detect:block-aborted"
 
 # --------------------------------------------------------------------------
 # i — require_root and the sudo password-prompt problem
@@ -618,7 +636,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
     check_has_not "require_root:allowlist-no-wildcard" "$SUDO_KEEP" '*'
     check_has_not "require_root:cached-credential-no-sudo-E" "$trace" 'sudo -E'
     check_has_not "require_root:cached-credential-no-hint" "$out" 'faillock'
-)
+    pass "blocks:require-root-cached:block-complete"
+) || fail "blocks:require-root-cached:block-aborted"
 
 ( # (b) no TTY and no cached credential: stop with instructions, never re-exec
     DRY_RUN=0
@@ -664,7 +683,8 @@ CHILD
     check_has_not "require_root:no-tty-no-raw-tty-error" "$out" 'a terminal is required'
     check_has "require_root:no-tty-cache-probe-only" "$trace" 'sudo -n true'
     check_has_not "require_root:no-tty-no-sudo-E" "$trace" 'sudo -E'
-)
+    pass "blocks:require-root-no-tty:block-complete"
+) || fail "blocks:require-root-no-tty:block-aborted"
 
 # --------------------------------------------------------------------------
 # j — PATH hardening
@@ -697,7 +717,8 @@ chmod +x "$ATTACK_BIN/id"
     # exported, so every child process (sudo, systemctl, ciadpi) inherits it
     child_path="$(env | sed -n 's/^PATH=//p' | head -n 1)"
     check_eq "safe-path:exported-to-children" "${PATH:-}" "$child_path"
-)
+    pass "blocks:safe-path-root:block-complete"
+) || fail "blocks:safe-path-root:block-aborted"
 
 (
     # An unprivileged run keeps the caller PATH (dry-run wrappers and this
@@ -710,7 +731,8 @@ chmod +x "$ATTACK_BIN/id"
     esac
     check_eq "safe-path:documented-value" \
         '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "${_GDT_SAFE_PATH:-}"
-)
+    pass "blocks:safe-path-nonroot:block-complete"
+) || fail "blocks:safe-path-nonroot:block-aborted"
 
 # --------------------------------------------------------------------------
 # k — desync arguments are never glob-expanded
@@ -744,7 +766,8 @@ mkdir -p "$DECOY_DIR"
     check_has "no-glob:oneshot-literal-star" "$out" '--port 1080 *'
     check_has_not "no-glob:oneshot-no-decoy-aaa" "$out" 'aaa.conf'
     check_has_not "no-glob:oneshot-no-decoy-bbb" "$out" 'bbb.conf'
-)
+    pass "blocks:no-glob-oneshot:block-complete"
+) || fail "blocks:no-glob-oneshot:block-aborted"
 
 (
     DRY_RUN=0
@@ -764,7 +787,8 @@ mkdir -p "$DECOY_DIR"
     check_has "no-glob:argv-literal-star" "$trace" 'ciadpi --ip 127.0.0.1 --port 1080 *'
     check_has_not "no-glob:argv-no-decoy-aaa" "$trace" 'aaa.conf'
     check_has_not "no-glob:argv-no-decoy-bbb" "$trace" 'bbb.conf'
-)
+    pass "blocks:no-glob-argv:block-complete"
+) || fail "blocks:no-glob-argv:block-aborted"
 
 # --------------------------------------------------------------------------
 # l — teardown tolerance and the recorded transparent backend
@@ -803,7 +827,8 @@ mkdir -p "$DECOY_DIR"
     check_has "teardown-tolerance:proxy-still-restored" "$trace" \
         'gsettings set org.gnome.system.proxy mode'
     check_has "teardown-tolerance:dns-still-restored" "$trace" 'resolvectl revert lo'
-)
+    pass "blocks:teardown-tolerance:block-complete"
+) || fail "blocks:teardown-tolerance:block-aborted"
 
 (
     DRY_RUN=0
@@ -842,7 +867,8 @@ EOF
         'nft delete table ip6 goodbyedpi_turkey6'
     check_has "transparent-backend:iptables-leftovers-cleaned" "$trace" \
         'iptables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY'
-)
+    pass "blocks:teardown-iptables:block-complete"
+) || fail "blocks:teardown-iptables:block-aborted"
 
 # --------------------------------------------------------------------------
 # m — end-to-end order: snapshot, then apply, then restore
@@ -882,7 +908,8 @@ EOF
     else
         pass "e2e:state-file-removed"
     fi
-)
+    pass "blocks:e2e-order:block-complete"
+) || fail "blocks:e2e-order:block-aborted"
 
 # --------------------------------------------------------------------------
 # n — desktop user resolution
@@ -955,7 +982,8 @@ chmod +x "$ROOT_BIN/gsettings"
 
     check_eq "desktop-user:nonroot-name" 'desktopusr' "$(_gdt_desktop_user)"
     check_eq "desktop-user:nonroot-uid" '4242' "$(_gdt_desktop_uid)"
-)
+    pass "blocks:desktop-user-nonroot:block-complete"
+) || fail "blocks:desktop-user-nonroot:block-aborted"
 
 ( # (b) root run: SUDO_USER owns the session
     SUDO_USER='baris'
@@ -969,7 +997,8 @@ chmod +x "$ROOT_BIN/gsettings"
 
     check_eq "desktop-user:root-sudo-user" 'baris' "$(_gdt_desktop_user)"
     check_eq "desktop-user:root-sudo-user-uid" '1000' "$(_gdt_desktop_uid)"
-)
+    pass "blocks:desktop-user-root-sudo:block-complete"
+) || fail "blocks:desktop-user-root-sudo:block-aborted"
 
 ( # (c) root run without a usable SUDO_USER falls back to root
     SUDO_USER='root'
@@ -981,7 +1010,8 @@ chmod +x "$ROOT_BIN/gsettings"
     PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
     export PATH
     check_eq "desktop-user:sudo-user-root" 'root' "$(_gdt_desktop_user)"
-)
+    pass "blocks:desktop-user-root:block-complete"
+) || fail "blocks:desktop-user-root:block-aborted"
 
 ( # (d) unknown SUDO_USER (id fails) must not be trusted
     SUDO_USER='ghost'
@@ -993,7 +1023,8 @@ chmod +x "$ROOT_BIN/gsettings"
     PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
     export PATH
     check_eq "desktop-user:unknown-sudo-user-falls-back" 'root' "$(_gdt_desktop_user)"
-)
+    pass "blocks:desktop-user-unknown:block-complete"
+) || fail "blocks:desktop-user-unknown:block-aborted"
 
 ( # (e) root run without SUDO_USER at all
     unset SUDO_USER
@@ -1004,7 +1035,8 @@ chmod +x "$ROOT_BIN/gsettings"
     PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
     export PATH
     check_eq "desktop-user:no-sudo-user" 'root' "$(_gdt_desktop_user)"
-)
+    pass "blocks:desktop-user-none:block-complete"
+) || fail "blocks:desktop-user-none:block-aborted"
 
 # --------------------------------------------------------------------------
 # o — _as_desktop routes gsettings into the desktop session
@@ -1071,7 +1103,8 @@ mkdir -p "$ROOT_RUN_DIR/1000"
     save_state lo >/dev/null 2>&1
     trace="$(calls)"
     check_has "as-desktop:save-state-read" "$trace" "$prefix gsettings get org.gnome.system.proxy mode"
-)
+    pass "blocks:as-desktop-session:block-complete"
+) || fail "blocks:as-desktop-session:block-aborted"
 
 ( # unprivileged run: no prefix, the command runs as-is
     DRY_RUN=0
@@ -1090,7 +1123,8 @@ mkdir -p "$ROOT_RUN_DIR/1000"
     check_eq "as-desktop:nonroot-rc" 0 "$rc"
     check_has "as-desktop:nonroot-plain" "$trace" 'gsettings set org.gnome.system.proxy mode manual'
     check_has_not "as-desktop:nonroot-no-runuser" "$trace" 'runuser'
-)
+    pass "blocks:as-desktop-unprivileged:block-complete"
+) || fail "blocks:as-desktop-unprivileged:block-aborted"
 
 ( # (c) no runuser and no sudo: warn once, never pretend it worked
     PROXY_MODE=socks
@@ -1111,7 +1145,8 @@ mkdir -p "$ROOT_RUN_DIR/1000"
     check_has "as-desktop:no-wrapper-warn" "$out" 'runuser/sudo bulunamadi'
     check_has "as-desktop:no-wrapper-command" "$out" "'gsettings' masaustu kullanicisinin oturumunda calistirilamadi"
     check_eq "as-desktop:no-wrapper-prefix-empty" '' "${_GDT_AS_DESKTOP_ARGV[*]}"
-)
+    pass "blocks:as-desktop-no-wrapper:block-complete"
+) || fail "blocks:as-desktop-no-wrapper:block-aborted"
 
 ( # (d) runuser missing but sudo present: fall back to `sudo -u <user> -E env`
     SUDO_ONLY_BIN="$TMP/sudo-only-bin"
@@ -1139,7 +1174,8 @@ STUB
         "${_GDT_AS_DESKTOP_ARGV[*]}"
     # the require_root re-exec must never grow a -E; only the session hop does
     check_has_not "as-desktop:reexec-stays-on-allowlist" "$_GDT_SUDO_KEEP" 'DBUS_SESSION_BUS_ADDRESS'
-)
+    pass "blocks:as-desktop-sudo-fallback:block-complete"
+) || fail "blocks:as-desktop-sudo-fallback:block-aborted"
 
 # --------------------------------------------------------------------------
 # p — detect_proxy_backend: gsettings only when it can actually work
@@ -1174,7 +1210,8 @@ STUB
     check_eq "detect-proxy:schema-and-bus" 'gsettings' "$(detect_proxy_backend 2>/dev/null)"
     out="$(detect_proxy_backend 2>&1 >/dev/null)"
     check_has "detect-proxy:gsettings-log" "$out" 'Proxy arka ucu: gsettings'
-)
+    pass "blocks:detect-proxy-gsettings:block-complete"
+) || fail "blocks:detect-proxy-gsettings:block-aborted"
 
 ( # schema not visible through the desktop session -> environmentd
     mkdir -p "$HOME/.config/environment.d"
@@ -1190,7 +1227,8 @@ STUB
     check_eq "detect-proxy:schema-hidden" 'environmentd' "$(detect_proxy_backend 2>/dev/null)"
     out="$(detect_proxy_backend 2>&1 >/dev/null)"
     check_has "detect-proxy:schema-hidden-reason" "$out" 'semasi masaustu oturumunda gorunmuyor'
-)
+    pass "blocks:detect-proxy-hidden:block-complete"
+) || fail "blocks:detect-proxy-hidden:block-aborted"
 
 # --------------------------------------------------------------------------
 # q — a failed GNOME write is never swallowed
@@ -1233,7 +1271,8 @@ STUB
     check_has "degraded:error-headline" "$out" 'SOCKS proxy uygulanamadi'
     check_has "degraded:error-hint-runuser" "$out" 'runuser -u <kullanici>'
     check_has "degraded:error-hint-desktop" "$out" 'masaustu oturumundan calistirin'
-)
+    pass "blocks:degraded-proxy-write:block-complete"
+) || fail "blocks:degraded-proxy-write:block-aborted"
 
 ( # end to end: run_method_oneshot must exit non-zero and still restore
     child="$TMP/degraded-child.sh"
@@ -1278,7 +1317,8 @@ CHILD
     else
         pass "degraded:oneshot-trap-restored-state"
     fi
-)
+    pass "blocks:degraded-oneshot-restore:block-complete"
+) || fail "blocks:degraded-oneshot-restore:block-aborted"
 
 ( # service_remove: a degraded restore must warn and exit non-zero
     child="$TMP/remove-child.sh"
@@ -1330,7 +1370,8 @@ STATE
     fi
     check_has "degraded:service-remove-warn" "$out" 'GNOME proxy ayarlari geri yuklenemedi'
     check_has "degraded:service-remove-write-warn" "$out" 'GNOME proxy yazilamadi: gsettings set org.gnome.system.proxy'
-)
+    pass "blocks:degraded-service-remove:block-complete"
+) || fail "blocks:degraded-service-remove:block-aborted"
 
 # --------------------------------------------------------------------------
 # r — PATH: silent rewrite for sudo's secure_path, warn only on real drift
@@ -1362,7 +1403,8 @@ SAFE_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     else
         fail "path-check:trailing-extra-entry-is-foreign"
     fi
-)
+    pass "blocks:path-foreign-entry:block-complete"
+) || fail "blocks:path-foreign-entry:block-aborted"
 
 # source_path_case <path> — source the library with a stubbed root `id` and
 # print everything it logged. A shell function shadows `id` without putting a
@@ -1397,6 +1439,12 @@ check_has_not "path:extra-entry-no-secure-path-note" "$path_case_out" 'sudo secu
 # before the SOCKS proxy is applied on top of a dead port.
 # --------------------------------------------------------------------------
 
+# The unit name is also a library global, but these two blocks assert in the
+# parent shell (only the child below sources the library), so the literal is
+# declared here: $UNIT_NAME would be unbound there and `set -u` would abort the
+# whole block before a single assertion was recorded.
+HEALTH_UNIT='goodbyedpi-turkey'
+
 HEALTH_BIN="$TMP/health-bin"
 mkdir -p "$HEALTH_BIN"
 # ciadpi that never listens: prints one bind error and exits, like a real
@@ -1418,11 +1466,12 @@ chmod +x "$HEALTH_BIN/ciadpi"
     STUB_SS_LISTEN=1
     export STUB_SYSTEMCTL_ACTIVE STUB_SS_LISTEN
 
-    out="$(_gdt_service_health_check "$UNIT_NAME" 2>&1)"
+    out="$(_gdt_service_health_check "$HEALTH_UNIT" 2>&1)"
     rc=$?
     check_eq "service-health:healthy-rc" 0 "$rc"
-    check_has "service-health:healthy-log" "$out" "Servis aktif ve dinliyor: $UNIT_NAME"
-)
+    check_has "service-health:healthy-log" "$out" "Servis aktif ve dinliyor: $HEALTH_UNIT"
+    pass "blocks:service-health-ok:block-complete"
+) || fail "blocks:service-health-ok:block-aborted"
 
 ( # unit inactive/failed: run_method_service_install must exit non-zero
     child="$TMP/service-install-child.sh"
@@ -1434,6 +1483,10 @@ set -euo pipefail
 . "$1"
 PATH="$2"
 export PATH
+# The library pins CIADPI_BIN to linux/bin/ciadpi, the gitignored build output
+# that a fresh CI checkout does not have: without this the install would die in
+# require_ciadpi instead of reaching the health check this group is about.
+CIADPI_BIN="$5"
 UNIT_PATH="$3"
 STATE_DIR="$4"
 STATE_FILE="$STATE_DIR/prev-state.env"
@@ -1451,7 +1504,8 @@ CHILD
     STUB_JOURNAL_LINES='goodbyedpi-turkey.service: Failed to locate executable /home/u/repo/linux/bin/ciadpi: No such file or directory' \
     GOODBYEDPI_DNS=off \
         bash "$child" "$LIB_FILE" "$ROOT_BIN:$STUB_BIN:/usr/bin:/bin" \
-        "$svc_dir/etc/goodbyedpi-turkey.service" "$svc_dir/state" >"$out_file" 2>&1
+        "$svc_dir/etc/$HEALTH_UNIT.service" "$svc_dir/state" "$HEALTH_BIN/ciadpi" \
+        >"$out_file" 2>&1
     rc=$?
     out="$(cat "$out_file")"
     trace="$(calls)"
@@ -1468,11 +1522,12 @@ CHILD
     check_has "service-health:names-port-in-use" "$out" 'portu baska bir surec tarafindan kullaniliyor'
     check_has "service-health:recovery-command" "$out" 'sudo ./scripts/service_remove.sh'
     check_has "service-health:journal-printed" "$out" 'Failed to locate executable'
-    check_has "service-health:journal-consulted" "$trace" "journalctl -u $UNIT_NAME -n 20 --no-pager"
+    check_has "service-health:journal-consulted" "$trace" "journalctl -u $HEALTH_UNIT -n 20 --no-pager"
     check_has_not "service-health:no-success-log" "$out" 'Servis kuruldu:'
     # the proxy must not be applied on top of a dead unit
     check_has_not "service-health:no-proxy-write" "$trace" 'gsettings set'
-)
+    pass "blocks:service-health-fail:block-complete"
+) || fail "blocks:service-health-fail:block-aborted"
 
 # --------------------------------------------------------------------------
 # u — the one-shot path never claims success when ciadpi is not listening
@@ -1497,7 +1552,8 @@ CHILD
     check_has "oneshot-health:names-port-in-use" "$out" 'portu baska bir surec tarafindan kullaniliyor'
     check_has "oneshot-health:mentions-recovery" "$out" 'sudo ./scripts/service_remove.sh'
     check_has_not "oneshot-health:no-listening-log" "$out" 'ciadpi dinliyor'
-)
+    pass "blocks:oneshot-health:block-complete"
+) || fail "blocks:oneshot-health:block-aborted"
 
 
 passed=$(grep -c '^ok ' "$RESULTS" 2>/dev/null || true)
