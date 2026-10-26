@@ -1,5 +1,10 @@
 @ECHO OFF
 PUSHD "%~dp0"
+CALL "%~dp0_require_admin.cmd" || (POPD & EXIT /B 1)
+echo UYARI: Bu klasor kullanici tarafindan yazilabilir bir konumdadir.
+echo Hizmet LocalSystem hesabiyla calisir, bu yuzden klasordeki dosyalari
+echo yetkisiz kisiler degistirebilir. ZIP arsivini yalnizca yoneticinin
+echo yazabildigi bir klasore cikarin (or. C:\Program Files\GoodbyeDPI).
 set _arch=x86
 IF "%PROCESSOR_ARCHITECTURE%"=="AMD64" (set _arch=x86_64)
 IF DEFINED PROCESSOR_ARCHITEW6432 (set _arch=x86_64)
