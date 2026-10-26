@@ -81,6 +81,11 @@ copy these names from the README), and changing the fixed ports/labels
 
 Never claim "done" without running the gate and pasting the exit code.
 
+Multi-step work (new subsystem, security pass, multi-file change) is planned and
+recorded under `docs/plans/` — start at `docs/plans/README.md` for the task-spec
+contract, the three verification gates (local static / CI build / real hardware)
+and the execution rules. Linux gate: `cd linux && make check && make test`.
+
 If `macos/tests/static-checks.sh` exists (it does in this worktree), that is
 the project gate — run it from the repo root: it runs `bash -n` on every
 `*.sh` under `macos/` (skipping `third_party/` and `bin/`) and exits 0 only
