@@ -131,6 +131,15 @@ DRY_RUN=1 ./scripts/turkey_dnsredir.sh
   `sudo iptables -t nat -F GOODBYEDPI_TURKEY` ve `sudo ./scripts/service_remove.sh`. `nft` kullanıyorsan
   `sudo nft delete table ip goodbyedpi_turkey` aynı işi görür.
 - **Hâlâ engel var:** yöntemi değiştir (tablodaki alt varyantlar), sonra servis kurulumunu tekrarla.
+- **`dconf-WARNING: failed to commit changes to dconf: "dbus-launch --autolaunch=..."`:** proxy ayarı masaüstü
+  kullanıcısına yazılamamış demektir (tarayıcı SOCKS proxy'yi görmez, atlatma sessizce çalışmaz). GNOME proxy'si kullanıcı
+  oturumunun D-Bus hattından yazıldığı için ortak katman `gsettings` çağrılarını artık `runuser -u $SUDO_USER -- env
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus` ile masaüstü kullanıcısı olarak çalıştırır (`runuser` yoksa
+  `sudo -u` yoluna düşer). İkisi de yoksa ya da yazma yine başarısız olursa betik başarı taklidi yapmaz: uyarı verir,
+  "SOCKS proxy uygulanamadı" hatasıyla sıfırdan farklı çıkış koduyla durur ve kaydettiği durumu geri yükler.
+- **GNOME dışı masaüstü (KDE, XFCE...):** `org.gnome.system.proxy` şeması ya da oturum D-Bus hattı yoksa proxy
+  `~/.config/environment.d/90-goodbyedpi-turkey.conf` (root'ta `/etc/environment.d/...`) üzerinden yazılır, yeni oturum
+  açılışında etkin olur; seçilen arka uç ve nedeni her çalışmada `[i] Proxy arka ucu: ...` satırıyla loglanır.
 
 ## Neyin doğrulanmadığı
 

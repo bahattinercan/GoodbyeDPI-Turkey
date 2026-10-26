@@ -850,8 +850,506 @@ EOF
 )
 
 # --------------------------------------------------------------------------
-# Summary
+# n — desktop user resolution
+#
+# The GNOME proxy belongs to the desktop user, not to root. `id` is read
+# through the command (never $EUID), so a stub can answer for both cases.
 # --------------------------------------------------------------------------
+
+NONROOT_BIN="$TMP/nonroot-bin"
+mkdir -p "$NONROOT_BIN"
+cat >"$NONROOT_BIN/id" <<'STUB'
+#!/bin/bash
+# Test stub for id: an ordinary desktop user. The uid is deliberately not the
+# test runner's own, so only a library that really asks `id` gets it right.
+case " $* " in
+    *' -u desktopusr '*) printf '4242\n' ;;
+    ' -un '*) printf 'desktopusr\n' ;;
+    *) printf '4242\n' ;;
+esac
+STUB
+chmod +x "$NONROOT_BIN/id"
+
+ROOT_BIN="$TMP/root-bin"
+mkdir -p "$ROOT_BIN"
+cat >"$ROOT_BIN/id" <<'STUB'
+#!/bin/bash
+# Test stub for id: root for `-u`, uid 1000 for the desktop user `baris`.
+printf 'id %s\n' "$*" >>"${CALLS_LOG:-/dev/null}"
+case " $* " in
+    *' -u baris '*) printf '1000\n' ;;
+    *' -u ghost '*) exit 1 ;;
+    ' -un '*) printf 'baris\n' ;;
+    *) printf '0\n' ;;
+esac
+STUB
+chmod +x "$ROOT_BIN/id"
+
+cat >"$ROOT_BIN/runuser" <<'STUB'
+#!/bin/bash
+# Test stub for runuser: record the exact prefix, then execute what it wraps
+# so the gsettings stub still sees the injected session environment.
+printf 'runuser %s\n' "$*" >>"${CALLS_LOG:-/dev/null}"
+shift 2
+[ "${1:-}" = '--' ] && shift
+exec "$@"
+STUB
+chmod +x "$ROOT_BIN/runuser"
+
+cat >"$ROOT_BIN/gsettings" <<'STUB'
+#!/bin/bash
+# Test stub for gsettings: records argv *and* the session bus it inherited, so
+# a test can prove DBUS_SESSION_BUS_ADDRESS really reached the tool.
+printf 'gsettings %s [dbus=%s]\n' "$*" "${DBUS_SESSION_BUS_ADDRESS:-<none>}" >>"${CALLS_LOG:-/dev/null}"
+case " ${1:-} " in
+    ' list-schemas ')
+        # the schema probe always works; only the writes are made to fail
+        [ -n "${STUB_GSETTINGS_SCHEMA:-}" ] && printf 'org.gnome.system.proxy\n'
+        exit 0
+        ;;
+esac
+exit "${STUB_GSETTINGS_RC:-0}"
+STUB
+chmod +x "$ROOT_BIN/gsettings"
+
+( # (a) unprivileged run: the desktop user is the caller
+    PATH="$NONROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+
+    check_eq "desktop-user:nonroot-name" 'desktopusr' "$(_gdt_desktop_user)"
+    check_eq "desktop-user:nonroot-uid" '4242' "$(_gdt_desktop_uid)"
+)
+
+( # (b) root run: SUDO_USER owns the session
+    SUDO_USER='baris'
+    export SUDO_USER
+    PATH="$ROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+
+    check_eq "desktop-user:root-sudo-user" 'baris' "$(_gdt_desktop_user)"
+    check_eq "desktop-user:root-sudo-user-uid" '1000' "$(_gdt_desktop_uid)"
+)
+
+( # (c) root run without a usable SUDO_USER falls back to root
+    SUDO_USER='root'
+    export SUDO_USER
+    PATH="$ROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    check_eq "desktop-user:sudo-user-root" 'root' "$(_gdt_desktop_user)"
+)
+
+( # (d) unknown SUDO_USER (id fails) must not be trusted
+    SUDO_USER='ghost'
+    export SUDO_USER
+    PATH="$ROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    check_eq "desktop-user:unknown-sudo-user-falls-back" 'root' "$(_gdt_desktop_user)"
+)
+
+( # (e) root run without SUDO_USER at all
+    unset SUDO_USER
+    PATH="$ROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    check_eq "desktop-user:no-sudo-user" 'root' "$(_gdt_desktop_user)"
+)
+
+# --------------------------------------------------------------------------
+# o — _as_desktop routes gsettings into the desktop session
+#
+# Root has no session bus, so every gsettings call must be prefixed with
+# `runuser -u <user> -- env XDG_RUNTIME_DIR=... DBUS_SESSION_BUS_ADDRESS=...`.
+# --------------------------------------------------------------------------
+
+ROOT_RUN_DIR="$TMP/run-user"
+mkdir -p "$ROOT_RUN_DIR/1000"
+: >"$ROOT_RUN_DIR/1000/bus"
+
+(
+    DRY_RUN=0
+    PROXY_MODE=socks
+    SUDO_USER='baris'
+    STUB_GSETTINGS_SCHEMA=1
+    export SUDO_USER STUB_GSETTINGS_SCHEMA
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+    export _GDT_RUN_USER_DIR
+
+    prefix="runuser -u baris -- env XDG_RUNTIME_DIR=$ROOT_RUN_DIR/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=$ROOT_RUN_DIR/1000/bus"
+
+    check_eq "as-desktop:session-bus-path" "$ROOT_RUN_DIR/1000/bus" "$(_gdt_session_bus_path)"
+    if _gdt_session_bus_ready; then
+        pass "as-desktop:bus-ready"
+    else
+        fail "as-desktop:bus-ready"
+    fi
+
+    calls_reset
+    out="$(apply_proxy 2>&1)"
+    rc=$?
+    trace="$(calls)"
+
+    check_eq "as-desktop:apply-rc" 0 "$rc"
+    check_eq "as-desktop:not-degraded" 0 "${PROXY_DEGRADED:-0}"
+    check_has "as-desktop:runuser-prefix" "$trace" "$prefix gsettings set org.gnome.system.proxy mode manual"
+    check_has "as-desktop:runuser-prefix-socks" "$trace" "$prefix gsettings set org.gnome.system.proxy.socks host 127.0.0.1"
+    check_has "as-desktop:runuser-prefix-port" "$trace" "$prefix gsettings set org.gnome.system.proxy.socks port 1080"
+    # the injected session bus must survive env(1) and reach gsettings itself
+    check_has "as-desktop:dbus-reaches-gsettings" "$trace" \
+        "gsettings set org.gnome.system.proxy mode manual [dbus=unix:path=$ROOT_RUN_DIR/1000/bus]"
+    check_has "as-desktop:apply-log" "$out" 'GNOME proxy ayarlandi'
+
+    # Every gsettings invocation is routed: no bare call, all carry the bus.
+    gs_total=$(grep -c '^gsettings ' "$CALLS_LOG" 2>/dev/null || true)
+    gs_with_bus=$(grep -c "^gsettings .*\[dbus=unix:path=$ROOT_RUN_DIR/1000/bus\]" "$CALLS_LOG" 2>/dev/null || true)
+    check_eq "as-desktop:all-gsettings-carry-bus" "${gs_total:-0}" "${gs_with_bus:-0}"
+    if [ "${gs_total:-0}" -ge 5 ]; then
+        pass "as-desktop:probe-and-writes-routed"
+    else
+        fail "as-desktop:probe-and-writes-routed (sadece ${gs_total:-0} cagri)"
+    fi
+
+    # save_state reads the previous values through the same route
+    calls_reset
+    STATE_DIR="$TMP/desktop-state"
+    STATE_FILE="$STATE_DIR/prev-state.env"
+    save_state lo >/dev/null 2>&1
+    trace="$(calls)"
+    check_has "as-desktop:save-state-read" "$trace" "$prefix gsettings get org.gnome.system.proxy mode"
+)
+
+( # unprivileged run: no prefix, the command runs as-is
+    DRY_RUN=0
+    PROXY_MODE=socks
+    STUB_GSETTINGS_SCHEMA=1
+    export STUB_GSETTINGS_SCHEMA
+    PATH="$NONROOT_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+
+    calls_reset
+    _as_desktop gsettings set org.gnome.system.proxy mode manual >/dev/null 2>&1
+    rc=$?
+    trace="$(calls)"
+    check_eq "as-desktop:nonroot-rc" 0 "$rc"
+    check_has "as-desktop:nonroot-plain" "$trace" 'gsettings set org.gnome.system.proxy mode manual'
+    check_has_not "as-desktop:nonroot-no-runuser" "$trace" 'runuser'
+)
+
+( # (c) no runuser and no sudo: warn once, never pretend it worked
+    PROXY_MODE=socks
+    EMPTY_BIN="$TMP/empty-bin"
+    mkdir -p "$EMPTY_BIN"
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    id() { case " $* " in *' -u baris '*) printf '1000\n' ;; *) printf '0\n' ;; esac; }
+    PATH="$EMPTY_BIN"
+    export PATH
+    SUDO_USER='baris'
+    export SUDO_USER
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+
+    out="$(_as_desktop gsettings set org.gnome.system.proxy mode manual 2>&1)"
+    rc=$?
+    check_eq "as-desktop:no-wrapper-rc" 1 "$rc"
+    check_has "as-desktop:no-wrapper-warn" "$out" 'runuser/sudo bulunamadi'
+    check_has "as-desktop:no-wrapper-command" "$out" "'gsettings' masaustu kullanicisinin oturumunda calistirilamadi"
+    check_eq "as-desktop:no-wrapper-prefix-empty" '' "${_GDT_AS_DESKTOP_ARGV[*]}"
+)
+
+( # (d) runuser missing but sudo present: fall back to `sudo -u <user> -E env`
+    SUDO_ONLY_BIN="$TMP/sudo-only-bin"
+    mkdir -p "$SUDO_ONLY_BIN"
+    cat >"$SUDO_ONLY_BIN/sudo" <<'STUB'
+#!/bin/bash
+printf 'sudo %s\n' "$*" >>"${CALLS_LOG:-/dev/null}"
+exit 0
+STUB
+    chmod +x "$SUDO_ONLY_BIN/sudo"
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    id() { case " $* " in *' -u baris '*) printf '1000\n' ;; *) printf '0\n' ;; esac; }
+    PATH="$SUDO_ONLY_BIN"
+    export PATH
+    SUDO_USER='baris'
+    export SUDO_USER
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+
+    rc=0
+    _gdt_session_prefix || rc=$?
+    check_eq "as-desktop:sudo-fallback-rc" 0 "$rc"
+    check_eq "as-desktop:sudo-fallback-argv" \
+        "sudo -u baris -E env XDG_RUNTIME_DIR=$ROOT_RUN_DIR/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=$ROOT_RUN_DIR/1000/bus" \
+        "${_GDT_AS_DESKTOP_ARGV[*]}"
+    # the require_root re-exec must never grow a -E; only the session hop does
+    check_has_not "as-desktop:reexec-stays-on-allowlist" "$_GDT_SUDO_KEEP" 'DBUS_SESSION_BUS_ADDRESS'
+)
+
+# --------------------------------------------------------------------------
+# p — detect_proxy_backend: gsettings only when it can actually work
+# --------------------------------------------------------------------------
+
+(
+    STUB_GSETTINGS_SCHEMA=1
+    export STUB_GSETTINGS_SCHEMA
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    SUDO_USER='baris'
+    export SUDO_USER
+    # bus socket missing for uid 1000 -> the GNOME backend cannot work
+    _GDT_RUN_USER_DIR="$TMP/run-user-no-bus"
+    export _GDT_RUN_USER_DIR
+    mkdir -p "$TMP/run-user-no-bus/1000" "$HOME/.config/environment.d"
+
+    if _gdt_session_bus_ready; then
+        fail "detect-proxy:bus-missing-detected"
+    else
+        pass "detect-proxy:bus-missing-detected"
+    fi
+    check_eq "detect-proxy:schema-visible-but-no-bus" 'environmentd' "$(detect_proxy_backend 2>/dev/null)"
+    out="$(detect_proxy_backend 2>&1 >/dev/null)"
+    check_has "detect-proxy:fallback-reason" "$out" 'masaustu oturum veriyolu yok'
+    check_has "detect-proxy:fallback-names-backend" "$out" 'Proxy arka ucu: environmentd'
+
+    # same run with the socket present: GNOME backend wins again
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+    check_eq "detect-proxy:schema-and-bus" 'gsettings' "$(detect_proxy_backend 2>/dev/null)"
+    out="$(detect_proxy_backend 2>&1 >/dev/null)"
+    check_has "detect-proxy:gsettings-log" "$out" 'Proxy arka ucu: gsettings'
+)
+
+( # schema not visible through the desktop session -> environmentd
+    mkdir -p "$HOME/.config/environment.d"
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    SUDO_USER='baris'
+    export SUDO_USER
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+    export _GDT_RUN_USER_DIR
+
+    check_eq "detect-proxy:schema-hidden" 'environmentd' "$(detect_proxy_backend 2>/dev/null)"
+    out="$(detect_proxy_backend 2>&1 >/dev/null)"
+    check_has "detect-proxy:schema-hidden-reason" "$out" 'semasi masaustu oturumunda gorunmuyor'
+)
+
+# --------------------------------------------------------------------------
+# q — a failed GNOME write is never swallowed
+#
+# STUB_GSETTINGS_RC=1 makes every write fail while the schema stays visible.
+# The run must warn, mark itself degraded and exit non-zero — the EXIT trap
+# still restores the state it saved before touching anything.
+# --------------------------------------------------------------------------
+
+(
+    DRY_RUN=0
+    PROXY_MODE=socks
+    SUDO_USER='baris'
+    STUB_GSETTINGS_SCHEMA=1
+    STUB_GSETTINGS_RC=1
+    export SUDO_USER STUB_GSETTINGS_SCHEMA STUB_GSETTINGS_RC
+    # shellcheck source=/dev/null
+    . "$LIB_FILE" 2>/dev/null
+    PATH="$ROOT_BIN:$STUB_BIN:/usr/bin:/bin"
+    export PATH
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR"
+    export _GDT_RUN_USER_DIR
+
+    # apply_proxy must run in *this* shell: a command substitution would hide
+    # the PROXY_DEGRADED flag it sets from the caller that has to fail.
+    calls_reset
+    apply_out="$TMP/degraded-apply.out"
+    apply_proxy >"$apply_out" 2>&1
+    rc=$?
+    out="$(cat "$apply_out")"
+    check_eq "degraded:apply-rc" 0 "$rc"
+    check_eq "degraded:flag-set" 1 "${PROXY_DEGRADED:-0}"
+    check_has "degraded:warn-write" "$out" 'GNOME proxy yazilamadi: gsettings set org.gnome.system.proxy mode'
+    check_has "degraded:warn-proxy" "$out" 'SOCKS proxy uygulanmis sayilmaz'
+    check_has_not "degraded:no-success-log" "$out" 'GNOME proxy ayarlandi'
+
+    out="$(_gdt_fail_if_degraded 2>&1)"
+    rc=$?
+    check_eq "degraded:fail-if-degraded-rc" 1 "$rc"
+    check_has "degraded:error-headline" "$out" 'SOCKS proxy uygulanamadi'
+    check_has "degraded:error-hint-runuser" "$out" 'runuser -u <kullanici>'
+    check_has "degraded:error-hint-desktop" "$out" 'masaustu oturumundan calistirin'
+)
+
+( # end to end: run_method_oneshot must exit non-zero and still restore
+    child="$TMP/degraded-child.sh"
+    cat >"$child" <<'CHILD'
+#!/bin/bash
+# Stands in for a wrapper: the library decides the exit code.
+set -euo pipefail
+. "$1"
+PATH="$2"
+export PATH
+CIADPI_BIN="$3/ciadpi"
+STATE_DIR="$4"
+STATE_FILE="$STATE_DIR/prev-state.env"
+run_method_oneshot default
+CHILD
+    chmod +x "$child"
+
+    degraded_state="$TMP/degraded-state"
+    out_file="$TMP/degraded.out"
+    calls_reset
+    SUDO_USER='baris' \
+    STUB_GSETTINGS_SCHEMA=1 \
+    STUB_GSETTINGS_RC=1 \
+    STUB_IP_ROUTE='default via 192.168.1.1 dev eth9' \
+    STUB_RESOLVECTL_STATUS='Global' \
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR" \
+        bash "$child" "$LIB_FILE" "$ROOT_BIN:$STUB_BIN:/usr/bin:/bin" "$STUB_BIN" "$degraded_state" \
+        >"$out_file" 2>&1
+    rc=$?
+    out="$(cat "$out_file")"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "degraded:oneshot-nonzero-rc (rc=0)"
+    else
+        pass "degraded:oneshot-nonzero-rc"
+    fi
+    check_has "degraded:oneshot-warn" "$out" 'GNOME proxy yazilamadi: gsettings set org.gnome.system.proxy'
+    check_has "degraded:oneshot-error" "$out" 'SOCKS proxy uygulanamadi'
+    check_has_not "degraded:oneshot-no-false-success" "$out" 'GNOME proxy ayarlandi'
+    if [ -e "$degraded_state/prev-state.env" ]; then
+        fail "degraded:oneshot-trap-restored-state"
+    else
+        pass "degraded:oneshot-trap-restored-state"
+    fi
+)
+
+( # service_remove: a degraded restore must warn and exit non-zero
+    child="$TMP/remove-child.sh"
+    cat >"$child" <<'CHILD'
+#!/bin/bash
+# Stands in for service_remove.sh.
+set -euo pipefail
+. "$1"
+PATH="$2"
+export PATH
+STATE_DIR="$3"
+STATE_FILE="$STATE_DIR/prev-state.env"
+run_service_remove
+CHILD
+    chmod +x "$child"
+
+    remove_state="$TMP/remove-state"
+    mkdir -p "$remove_state"
+    cat >"$remove_state/prev-state.env" <<'STATE'
+SAVED_IFACE=lo
+SAVED_PROXY_MODE=socks
+SAVED_PROXY_BACKEND=gsettings
+SAVED_GS_MODE='manual'
+SAVED_GS_HOST='127.0.0.1'
+SAVED_GS_PORT=1080
+SAVED_GS_IGNORE='[]'
+SAVED_DNS_BACKEND=none
+SAVED_DNS_APPLIED=0
+STATE
+
+    out_file="$TMP/remove.out"
+    calls_reset
+    SUDO_USER='baris' \
+    STUB_GSETTINGS_SCHEMA=1 \
+    STUB_GSETTINGS_RC=1 \
+    _GDT_RUN_USER_DIR="$ROOT_RUN_DIR" \
+        bash "$child" "$LIB_FILE" "$ROOT_BIN:$STUB_BIN:/usr/bin:/bin" "$remove_state" \
+        >"$out_file" 2>&1
+    rc=$?
+    out="$(cat "$out_file")"
+
+    if [ "$rc" -eq 0 ]; then
+        fail "degraded:service-remove-nonzero-rc (rc=0)"
+    else
+        pass "degraded:service-remove-nonzero-rc"
+    fi
+    check_has "degraded:service-remove-warn" "$out" 'GNOME proxy ayarlari geri yuklenemedi'
+    check_has "degraded:service-remove-write-warn" "$out" 'GNOME proxy yazilamadi: gsettings set org.gnome.system.proxy'
+)
+
+# --------------------------------------------------------------------------
+# r — PATH: silent rewrite for sudo's secure_path, warn only on real drift
+# --------------------------------------------------------------------------
+
+SAFE_PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+(
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+
+    if _gdt_path_has_foreign_entry "$SAFE_PATH"; then
+        fail "path-check:exact-safe-list-is-not-foreign"
+    else
+        pass "path-check:exact-safe-list-is-not-foreign"
+    fi
+    if _gdt_path_has_foreign_entry '/usr/local/sbin:/usr/local/bin:/usr/bin'; then
+        fail "path-check:subset-is-not-foreign"
+    else
+        pass "path-check:subset-is-not-foreign"
+    fi
+    if _gdt_path_has_foreign_entry '/home/baris/tmpbin:/usr/bin'; then
+        pass "path-check:extra-entry-is-foreign"
+    else
+        fail "path-check:extra-entry-is-foreign"
+    fi
+    if _gdt_path_has_foreign_entry '/usr/bin:/home/baris/tmpbin'; then
+        pass "path-check:trailing-extra-entry-is-foreign"
+    else
+        fail "path-check:trailing-extra-entry-is-foreign"
+    fi
+)
+
+# source_path_case <path> — source the library with a stubbed root `id` and
+# print everything it logged. A shell function shadows `id` without putting a
+# directory on PATH, so the PATH under test stays exactly as given.
+path_case_out=''
+source_path_case() {
+    PATH="$1" TEST_LIB="$LIB_FILE" bash -c '
+        id() { printf "0\n"; }
+        . "$TEST_LIB"
+        printf "final-path=%s\n" "$PATH"
+    ' 2>&1
+}
+
+path_case_out="$(source_path_case '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin')"
+check_has_not "path:secure-path-no-warn" "$path_case_out" '[!]'
+check_has "path:secure-path-log-line" "$path_case_out" '[i] PATH sabitlendi (root)'
+check_has "path:secure-path-silent-rewrite" "$path_case_out" 'sudo secure_path'
+check_has "path:secure-path-final" "$path_case_out" "final-path=$SAFE_PATH"
+
+path_case_out="$(source_path_case '/home/baris/tmpbin:/usr/local/bin:/usr/bin')"
+check_has "path:extra-entry-warns" "$path_case_out" '[!] PATH sabitlendi (root)'
+check_has "path:extra-entry-named" "$path_case_out" "/home/baris/tmpbin"
+check_has "path:extra-entry-rewritten" "$path_case_out" "final-path=$SAFE_PATH"
+check_has_not "path:extra-entry-no-secure-path-note" "$path_case_out" 'sudo secure_path'
+
 
 passed=$(grep -c '^ok ' "$RESULTS" 2>/dev/null || true)
 failed=$(grep -c '^fail ' "$RESULTS" 2>/dev/null || true)

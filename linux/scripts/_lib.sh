@@ -50,6 +50,10 @@ esac
 # preview the restore.
 _GDT_STATE_BODY=""
 
+# 1 when a proxy write failed. The run must then exit non-zero instead of
+# reporting a SOCKS proxy that was never applied.
+PROXY_DEGRADED="${PROXY_DEGRADED:-0}"
+
 # --------------------------------------------------------------------------
 # Environment hardening
 # --------------------------------------------------------------------------
@@ -84,12 +88,39 @@ warn() { printf '%s[!]%s %s\n' "$_C_WARN" "$_C_OFF" "$*" >&2; }
 err()  { printf '%s[x]%s %s\n' "$_C_ERR" "$_C_OFF" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# _gdt_path_has_foreign_entry <colon-list> — 0 when <colon-list> carries an
+# entry outside the fixed lookup order, 1 when it is a subset of it (sudo's
+# `secure_path` is exactly that, so a normal root run must not be noisy).
+_gdt_path_has_foreign_entry() {
+    local rest="${1:-}" entry
+    [ -n "$rest" ] || return 1
+    while [ -n "$rest" ]; do
+        case "$rest" in
+            *:*) entry=${rest%%:*}; rest=${rest#*:} ;;
+            *) entry=$rest; rest='' ;;
+        esac
+        case ":$_GDT_SAFE_PATH:" in
+            *":$entry:"*) : ;;
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Root only: force the fixed lookup order, because only root's lookups can be
 # turned into root code execution. An unprivileged run keeps the caller PATH —
 # that is where a dry-run wrapper or the stub-based test suite keeps its
 # shadowed commands.
+#
+# A subset of the safe order (that is what sudo's `secure_path` is) is a normal
+# root run, so it is rewritten quietly; only a caller-owned or otherwise
+# foreign entry is worth a warning.
 if [ "$(id -u)" = "0" ] && [ "${PATH:-}" != "$_GDT_SAFE_PATH" ]; then
-    warn "PATH sabitlendi (root): '${PATH:-}' yerine '$_GDT_SAFE_PATH'"
+    if _gdt_path_has_foreign_entry "${PATH:-}"; then
+        warn "PATH sabitlendi (root): guvenli listede olmayan dizin iceren '${PATH:-}' yerine '$_GDT_SAFE_PATH' kullanilacak"
+    else
+        log "PATH sabitlendi (root): '${PATH:-}' -> '$_GDT_SAFE_PATH' (sudo secure_path)"
+    fi
     PATH="$_GDT_SAFE_PATH"
 fi
 export PATH
@@ -291,6 +322,161 @@ method_dns_mode() {
 }
 
 # --------------------------------------------------------------------------
+# Desktop user session
+# --------------------------------------------------------------------------
+# A root run (the documented `sudo ./scripts/...`) still has to write the GNOME
+# proxy as the *desktop* user: `gsettings` talks to dconf over that user's
+# session bus, and root has none. The sudo re-exec deliberately keeps only
+# $_GDT_SUDO_KEEP, so DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR are gone; dconf
+# then tries `dbus-launch --autolaunch`, fails, and the proxy was never applied
+# while the script still reported success. Everything below routes proxy
+# read/writes back into the desktop session instead.
+
+# _gdt_uid — effective uid through the `id` command (tests stub `id`; $EUID
+# cannot be stubbed and runuser does not update it).
+_gdt_uid() {
+    local uid
+    uid=$(_capture id -u)
+    printf '%s\n' "${uid:-0}"
+}
+
+# _gdt_desktop_user — owner of the desktop session whose proxy we must change.
+_gdt_desktop_user() {
+    local uid user cuid
+    uid=$(_gdt_uid)
+    if [ "$uid" != '0' ]; then
+        user=$(_capture id -un)
+        printf '%s\n' "${user:-${USER:-root}}"
+        return 0
+    fi
+    user="${SUDO_USER:-}"
+    if [ -n "$user" ] && [ "$user" != 'root' ]; then
+        cuid=$(_capture id -u "$user")
+        if [ -n "$cuid" ] && [ "$cuid" != '0' ]; then
+            printf '%s\n' "$user"
+            return 0
+        fi
+    fi
+    printf 'root\n'
+}
+
+# _gdt_desktop_uid — uid of that user, again through `id`.
+_gdt_desktop_uid() {
+    local user
+    user=$(_gdt_desktop_user)
+    [ -n "$user" ] || return 1
+    _capture id -u "$user"
+}
+
+# _gdt_run_user_dir — root of the per-user runtime dirs; the single knob a test
+# needs to fake /run/user without touching the live session.
+_gdt_run_user_dir() { printf '%s\n' "${_GDT_RUN_USER_DIR:-/run/user}"; }
+
+# _gdt_session_bus_path — the session bus socket dconf/gsettings need.
+_gdt_session_bus_path() {
+    local uid
+    uid=$(_gdt_desktop_uid)
+    [ -n "$uid" ] || return 1
+    printf '%s\n' "$(_gdt_run_user_dir)/$uid/bus"
+}
+
+# _gdt_session_bus_ready — 1 when a root run can reach that bus. An
+# unprivileged run already lives in its own session, so it needs no check.
+_gdt_session_bus_ready() {
+    local bus
+    [ "$(_gdt_uid)" = '0' ] || return 0
+    bus=$(_gdt_session_bus_path) || return 1
+    [ -e "$bus" ]
+}
+
+# _GDT_AS_DESKTOP_ARGV — argv prefix that reaches the desktop user's session.
+_GDT_AS_DESKTOP_ARGV=()
+
+# _gdt_session_prefix — fill _GDT_AS_DESKTOP_ARGV. Empty for an unprivileged
+# run and for a root run whose desktop user is root; status 1 when root needs a
+# prefix but neither runuser nor sudo is available.
+_gdt_session_prefix() {
+    _GDT_AS_DESKTOP_ARGV=()
+    [ "$(_gdt_uid)" = '0' ] || return 0
+    local user uid rt
+    user=$(_gdt_desktop_user)
+    [ "$user" = 'root' ] && return 0
+    uid=$(_gdt_desktop_uid) || return 1
+    [ -n "$uid" ] || return 1
+    rt="$(_gdt_run_user_dir)/$uid"
+    if command -v runuser >/dev/null 2>&1; then
+        _GDT_AS_DESKTOP_ARGV=(runuser -u "$user" -- env "XDG_RUNTIME_DIR=$rt" "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus")
+    elif command -v sudo >/dev/null 2>&1; then
+        # -E here keeps only the two session variables added by `env`; the
+        # require_root re-exec still uses an explicit allow-list, never -E.
+        _GDT_AS_DESKTOP_ARGV=(sudo -u "$user" -E env "XDG_RUNTIME_DIR=$rt" "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus")
+    else
+        return 1
+    fi
+    return 0
+}
+
+# _as_desktop <cmd...> — run <cmd> as the desktop user, inside its session.
+_as_desktop() {
+    [ "$#" -gt 0 ] || die "_as_desktop: komut belirtilmedi"
+    if ! _gdt_session_prefix; then
+        warn "runuser/sudo bulunamadi: '$1' masaustu kullanicisinin oturumunda calistirilamadi"
+        return 1
+    fi
+    if [ "${#_GDT_AS_DESKTOP_ARGV[@]}" -eq 0 ]; then
+        "$@"
+        return $?
+    fi
+    "${_GDT_AS_DESKTOP_ARGV[@]}" "$@"
+}
+
+# _capture_desktop <cmd...> — read-only query in that session.
+_capture_desktop() { _as_desktop "$@" 2>/dev/null || true; }
+
+# _run_as_desktop <cmd...> — `run` (DRY_RUN aware) in that session.
+_run_as_desktop() {
+    [ "$#" -gt 0 ] || die "_run_as_desktop: komut belirtilmedi"
+    if ! _gdt_session_prefix; then
+        warn "Masaustu oturumuna erisilemiyor (runuser/sudo yok): $1"
+        return 1
+    fi
+    if [ "${#_GDT_AS_DESKTOP_ARGV[@]}" -eq 0 ]; then
+        run "$@"
+        return $?
+    fi
+    run "${_GDT_AS_DESKTOP_ARGV[@]}" "$@"
+}
+
+# _gsettings_set <schema> <key> <value> — one gsettings write in the desktop
+# user's session. A failed write is never swallowed: it warns and marks the run
+# degraded, so the wrapper exits non-zero instead of claiming a proxy that is
+# not there.
+_gsettings_set() {
+    local schema="${1:-}" key="${2:-}" value="${3:-}"
+    [ -n "$schema" ] || die "_gsettings_set: sema bos"
+    [ -n "$key" ] || die "_gsettings_set: anahtar bos"
+    if _run_as_desktop gsettings set "$schema" "$key" "$value"; then
+        return 0
+    fi
+    warn "GNOME proxy yazilamadi: gsettings set $schema $key"
+    PROXY_DEGRADED=1
+    return 1
+}
+
+# _gdt_fail_if_degraded — a run that could not write the proxy must not report
+# success: the bypass would silently do nothing. Returns 1 (after printing the
+# reason) when the caller has to exit non-zero.
+_gdt_fail_if_degraded() {
+    [ "${PROXY_DEGRADED:-0}" = '1' ] || return 0
+    [ "$PROXY_MODE" = 'socks' ] || return 0
+    err "SOCKS proxy uygulanamadi: GNOME proxy ayarlari masaustu kullanicisinin oturumuna yazilamadi."
+    err "  Masaustu kullanici: $(_gdt_desktop_user)  oturum veriyolu: $(_gdt_session_bus_path 2>/dev/null || printf 'bilinmiyor')"
+    err "  Duzeltme: betigi normal bir masaustu oturumundan calistirin; proxy ayarlari 'runuser -u <kullanici>' ile SUDO_USER"
+    err "  oturumuna yazilir. 'runuser' yoksa kurun; GNOME disi masaustunde environment.d arka ucu kullanilir."
+    return 1
+}
+
+# --------------------------------------------------------------------------
 # Backend detection (read-only)
 # --------------------------------------------------------------------------
 
@@ -304,24 +490,30 @@ detect_dns_backend() {
 }
 
 detect_proxy_backend() {
-    if command -v gsettings >/dev/null 2>&1 &&
-       _capture gsettings list-schemas | grep -qx 'org.gnome.system.proxy'; then
+    local reason backend
+    if ! command -v gsettings >/dev/null 2>&1; then
+        reason='gsettings yok'
+    elif ! _capture_desktop gsettings list-schemas | grep -qx 'org.gnome.system.proxy'; then
+        reason='org.gnome.system.proxy semasi masaustu oturumunda gorunmuyor'
+    elif ! _gdt_session_bus_ready; then
+        reason="masaustu oturum veriyolu yok: $(_gdt_session_bus_path 2>/dev/null)"
+    else
+        log 'Proxy arka ucu: gsettings (GNOME semasi ve masaustu oturum veriyolu hazir)'
         printf '%s\n' 'gsettings'
         return 0
     fi
+    # The GNOME backend cannot work here, so the proxy is written to
+    # environment.d instead of being dropped on the floor.
+    backend='none'
     if [ -d /etc/environment.d ] && [ -w /etc/environment.d ]; then
-        printf '%s\n' 'environmentd'
-        return 0
+        backend='environmentd'
+    elif [ -d "$HOME/.config/environment.d" ] && [ -w "$HOME/.config/environment.d" ]; then
+        backend='environmentd'
+    elif [ -w "$HOME/.config" ]; then
+        backend='environmentd'
     fi
-    if [ -d "$HOME/.config/environment.d" ] && [ -w "$HOME/.config/environment.d" ]; then
-        printf '%s\n' 'environmentd'
-        return 0
-    fi
-    if [ -w "$HOME/.config" ]; then
-        printf '%s\n' 'environmentd'
-        return 0
-    fi
-    printf '%s\n' 'none'
+    log "Proxy arka ucu: $backend (neden: $reason)"
+    printf '%s\n' "$backend"
 }
 
 # Default route interface, e.g. "eth0". Read-only.
@@ -393,10 +585,11 @@ save_state() {
     fi
 
     if [ "$proxy_backend" = 'gsettings' ]; then
-        gs_mode=$(_capture gsettings get org.gnome.system.proxy mode)
-        gs_host=$(_capture gsettings get org.gnome.system.proxy.socks host)
-        gs_port=$(_capture gsettings get org.gnome.system.proxy.socks port)
-        gs_ignore=$(_capture gsettings get org.gnome.system.proxy ignore-hosts)
+        # read as the desktop user: root has no session bus (see _as_desktop)
+        gs_mode=$(_capture_desktop gsettings get org.gnome.system.proxy mode)
+        gs_host=$(_capture_desktop gsettings get org.gnome.system.proxy.socks host)
+        gs_port=$(_capture_desktop gsettings get org.gnome.system.proxy.socks port)
+        gs_ignore=$(_capture_desktop gsettings get org.gnome.system.proxy ignore-hosts)
     elif [ "$proxy_backend" = 'environmentd' ]; then
         env_file=$(_env_file_path)
         [ -f "$env_file" ] && env_present=1
@@ -502,14 +695,22 @@ restore_state() {
 
     case "${SAVED_PROXY_BACKEND:-none}" in
         gsettings)
+            # Teardown continues even when a write fails, but the failure is
+            # recorded (PROXY_DEGRADED) instead of being swallowed.
             if [ -n "${SAVED_GS_MODE:-}" ]; then
-                run gsettings set org.gnome.system.proxy mode "$SAVED_GS_MODE" || true
+                _gsettings_set org.gnome.system.proxy mode "$SAVED_GS_MODE" || :
             else
-                run gsettings set org.gnome.system.proxy mode 'none' || true
+                _gsettings_set org.gnome.system.proxy mode 'none' || :
             fi
-            [ -n "${SAVED_GS_HOST:-}" ] && { run gsettings set org.gnome.system.proxy.socks host "$SAVED_GS_HOST" || true; }
-            [ -n "${SAVED_GS_PORT:-}" ] && { run gsettings set org.gnome.system.proxy.socks port "$SAVED_GS_PORT" || true; }
-            [ -n "${SAVED_GS_IGNORE:-}" ] && { run gsettings set org.gnome.system.proxy ignore-hosts "$SAVED_GS_IGNORE" || true; }
+            if [ -n "${SAVED_GS_HOST:-}" ]; then
+                _gsettings_set org.gnome.system.proxy.socks host "$SAVED_GS_HOST" || :
+            fi
+            if [ -n "${SAVED_GS_PORT:-}" ]; then
+                _gsettings_set org.gnome.system.proxy.socks port "$SAVED_GS_PORT" || :
+            fi
+            if [ -n "${SAVED_GS_IGNORE:-}" ]; then
+                _gsettings_set org.gnome.system.proxy ignore-hosts "$SAVED_GS_IGNORE" || :
+            fi
             ;;
         environmentd)
             if [ "${SAVED_ENV_FILE_PRESENT:-0}" = '1' ]; then
@@ -566,11 +767,15 @@ apply_proxy() {
     backend=$(detect_proxy_backend)
     case "$backend" in
         gsettings)
-            run gsettings set org.gnome.system.proxy mode 'manual'
-            run gsettings set org.gnome.system.proxy.socks host "$CIADPI_HOST"
-            run gsettings set org.gnome.system.proxy.socks port "$CIADPI_PORT"
-            run gsettings set org.gnome.system.proxy ignore-hosts "['localhost', '127.0.0.0/8', '::1']"
-            log "GNOME proxy ayarlandi: socks $CIADPI_HOST:$CIADPI_PORT"
+            _gsettings_set org.gnome.system.proxy mode 'manual' || :
+            _gsettings_set org.gnome.system.proxy.socks host "$CIADPI_HOST" || :
+            _gsettings_set org.gnome.system.proxy.socks port "$CIADPI_PORT" || :
+            _gsettings_set org.gnome.system.proxy ignore-hosts "['localhost', '127.0.0.0/8', '::1']" || :
+            if [ "$PROXY_DEGRADED" = '1' ]; then
+                warn "GNOME proxy ayarlari masaustu oturumuna yazilamadi; SOCKS proxy uygulanmis sayilmaz"
+            else
+                log "GNOME proxy ayarlandi: socks $CIADPI_HOST:$CIADPI_PORT"
+            fi
             ;;
         environmentd)
             env_file=$(_env_file_path)
@@ -591,8 +796,12 @@ clear_proxy() {
     backend=$(detect_proxy_backend)
     case "$backend" in
         gsettings)
-            run gsettings set org.gnome.system.proxy mode 'none'
-            log "GNOME proxy kapatildi"
+            _gsettings_set org.gnome.system.proxy mode 'none' || :
+            if [ "$PROXY_DEGRADED" = '1' ]; then
+                warn "GNOME proxy kapatilamadi: masaustu oturumuna yazilamadi"
+            else
+                log "GNOME proxy kapatildi"
+            fi
             ;;
         environmentd)
             env_file=$(_env_file_path)
@@ -936,6 +1145,9 @@ run_method_oneshot() {
         transparent_up
     else
         apply_proxy
+        # A degraded proxy write must fail the run: `exit` keeps the EXIT trap
+        # in charge, so the state saved above is restored either way.
+        _gdt_fail_if_degraded || exit 1
     fi
 
     log "Yontem: $method (dns=$mode, proxy=$PROXY_MODE, arayuz=$iface)"
@@ -982,6 +1194,7 @@ run_method_service_install() {
         transparent_up
     else
         apply_proxy
+        _gdt_fail_if_degraded || exit 1
     fi
     log "Servis kuruldu: $UNIT_PATH (yontem=$method, dns=$mode, proxy=$PROXY_MODE)"
 }
@@ -1000,5 +1213,9 @@ run_service_remove() {
     run systemctl daemon-reload
     transparent_down
     restore_state
+    if [ "${PROXY_DEGRADED:-0}" = '1' ]; then
+        warn "Servis kaldirildi ancak GNOME proxy ayarlari geri yuklenemedi: masaustu oturumuna yazilamadi (eski proxy degerlerini elle kontrol edin)"
+        exit 1
+    fi
     log "Servis kaldirildi ve onceki durum geri yuklendi: $UNIT_NAME"
 }
