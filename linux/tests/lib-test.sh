@@ -108,7 +108,15 @@ case "$name" in
         # takes the add path. `-L` probes whether the chain exists -> 0.
         case " $* " in
             *' -C '*) exit 1 ;;
+            # `-D` can be made to fail on purpose (teardown tolerance tests).
+            *' -D '*) exit "${STUB_IPT_DELETE_RC:-0}" ;;
         esac
+        ;;
+    ip)
+        # detect_default_iface reads `ip route show default`.
+        if [ -n "${STUB_IP_ROUTE:-}" ]; then
+            printf '%s\n' "$STUB_IP_ROUTE"
+        fi
         ;;
     resolvectl)
         if [ "${1:-}" = status ] && [ -n "${STUB_RESOLVECTL_STATUS:-}" ]; then
@@ -329,6 +337,14 @@ expected_dns_legacy() {
     fi
 
     check_eq "save_state:mode-600" 600 "$(stat -c '%a' "$STATE_FILE" 2>/dev/null)"
+    # The state dir carries the saved proxy/DNS snapshot too, so it is private
+    # as well; the .tmp sibling must never survive the atomic rename.
+    check_eq "save_state:dir-mode-700" 700 "$(stat -c '%a' "$STATE_DIR" 2>/dev/null)"
+    if [ -e "$STATE_FILE.tmp" ]; then
+        fail "save_state:no-tmp-leftover"
+    else
+        pass "save_state:no-tmp-leftover"
+    fi
 
     for key in SAVED_IFACE SAVED_PROXY_MODE SAVED_DNS_BACKEND SAVED_DNS_PREV \
         SAVED_RESOLV_BACKUP SAVED_PROXY_BACKEND SAVED_GS_MODE SAVED_GS_HOST \
@@ -447,13 +463,18 @@ expected_dns_legacy() {
     check_has "transparent_up-nft:table" "$trace" 'nft add table ip goodbyedpi_turkey'
     check_has "transparent_up-nft:chain" "$trace" 'nft add chain ip goodbyedpi_turkey output'
     check_has "transparent_up-nft:redirect" "$trace" 'nft add rule ip goodbyedpi_turkey output tcp redirect to :1080'
+    # O2: the nft branch mirrors the redirect for IPv6 as well.
+    check_has "transparent_up-nft:v6-table" "$trace" 'nft add table ip6 goodbyedpi_turkey6'
+    check_has "transparent_up-nft:v6-redirect" "$trace" 'nft add rule ip6 goodbyedpi_turkey6 output ip6 nexthdr tcp redirect to :1080'
     check_has_not "transparent_up-nft:no-iptables" "$trace" 'iptables'
 
     calls_reset
     transparent_down >/dev/null 2>&1
     rc=$?
     check_eq "transparent_down-nft:rc" 0 "$rc"
-    check_has "transparent_down-nft:delete-table" "$(calls)" 'nft delete table ip goodbyedpi_turkey'
+    down_trace="$(calls)"
+    check_has "transparent_down-nft:delete-table" "$down_trace" 'nft delete table ip goodbyedpi_turkey'
+    check_has "transparent_down-nft:v6-delete-table" "$down_trace" 'nft delete table ip6 goodbyedpi_turkey6'
 )
 
 # --------------------------------------------------------------------------
@@ -547,7 +568,10 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$FAKE_WRAPPER"
 
     check_eq "require_root:cached-credential-rc" 0 "$rc"
     check_has "require_root:cached-credential-reexec" "$trace" "sudo --preserve-env=$SUDO_KEEP -- $FAKE_WRAPPER"
+    check_has "require_root:preserve-env-flag" "$trace" '--preserve-env='
     check_has "require_root:preserve-env-carries-dns-policy" "$SUDO_KEEP" 'GOODBYEDPI_DNS'
+    # an explicit allow-list, never the caller's whole environment
+    check_has_not "require_root:allowlist-no-wildcard" "$SUDO_KEEP" '*'
     check_has_not "require_root:cached-credential-no-sudo-E" "$trace" 'sudo -E'
     check_has_not "require_root:cached-credential-no-hint" "$out" 'faillock'
 )
@@ -596,6 +620,224 @@ CHILD
     check_has_not "require_root:no-tty-no-raw-tty-error" "$out" 'a terminal is required'
     check_has "require_root:no-tty-cache-probe-only" "$trace" 'sudo -n true'
     check_has_not "require_root:no-tty-no-sudo-E" "$trace" 'sudo -E'
+)
+
+# --------------------------------------------------------------------------
+# j — PATH hardening
+#
+# The library rewrites PATH only for uid 0, because only root's lookups can be
+# turned into root code execution. A stub `id` that claims uid 0 makes that
+# branch reachable without root: after sourcing, an attacker-controlled
+# directory must be gone from PATH and the fixed order must be in place.
+# --------------------------------------------------------------------------
+
+ATTACK_BIN="$TMP/attacker-bin"
+mkdir -p "$ATTACK_BIN"
+cat >"$ATTACK_BIN/id" <<'STUB'
+#!/bin/bash
+# Test stub for id: claim to be root so the library's root-only hardening runs.
+printf '0\n'
+STUB
+chmod +x "$ATTACK_BIN/id"
+
+(
+    PATH="$ATTACK_BIN:$PATH"
+    export PATH
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+
+    check_eq "safe-path:root-uses-fixed-order" \
+        '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "${PATH:-}"
+    check_eq "safe-path:matches-documented-constant" "${_GDT_SAFE_PATH:-}" "${PATH:-}"
+    check_has_not "safe-path:attacker-prefix-dropped" "${PATH:-}" "$ATTACK_BIN"
+    # exported, so every child process (sudo, systemctl, ciadpi) inherits it
+    child_path="$(env | sed -n 's/^PATH=//p' | head -n 1)"
+    check_eq "safe-path:exported-to-children" "${PATH:-}" "$child_path"
+)
+
+(
+    # An unprivileged run keeps the caller PATH (dry-run wrappers and this
+    # stub suite rely on it); the fixed order is still the documented value.
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    case ":$PATH:" in
+        *":$STUB_BIN:"*) pass "safe-path:nonroot-keeps-caller-path" ;;
+        *) fail "safe-path:nonroot-keeps-caller-path (PATH=$PATH)" ;;
+    esac
+    check_eq "safe-path:documented-value" \
+        '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' "${_GDT_SAFE_PATH:-}"
+)
+
+# --------------------------------------------------------------------------
+# k — desync arguments are never glob-expanded
+#
+# A caller-supplied `GOODBYEDPI_ARGS='*'` used to reach ciadpi through an
+# unquoted expansion, so a `*` in the cwd (aaa.conf, bbb.conf) would have
+# turned into extra argv entries. Both paths are checked: the dry-run preview
+# of the one-shot runner and the real argv handed to ciadpi.
+# --------------------------------------------------------------------------
+
+DECOY_DIR="$TMP/decoys"
+mkdir -p "$DECOY_DIR"
+: >"$DECOY_DIR/aaa.conf"
+: >"$DECOY_DIR/bbb.conf"
+
+(
+    DRY_RUN=1
+    PROXY_MODE=socks
+    GOODBYEDPI_ARGS='*'
+    STUB_IP_ROUTE='default via 192.168.1.1 dev eth9'
+    export GOODBYEDPI_ARGS STUB_IP_ROUTE
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    # after sourcing: the library pins CIADPI_BIN to the real build output
+    CIADPI_BIN="$STUB_BIN/ciadpi"
+    STATE_DIR="$TMP/glob-state"
+    STATE_FILE="$STATE_DIR/prev-state.env"
+    cd "$DECOY_DIR" || exit 1
+
+    out="$(run_method_oneshot default 2>&1)"
+    check_has "no-glob:oneshot-literal-star" "$out" '--port 1080 *'
+    check_has_not "no-glob:oneshot-no-decoy-aaa" "$out" 'aaa.conf'
+    check_has_not "no-glob:oneshot-no-decoy-bbb" "$out" 'bbb.conf'
+)
+
+(
+    DRY_RUN=0
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    # after sourcing: the library pins CIADPI_BIN to the real build output, so
+    # overriding it earlier would run the compiled proxy instead of the stub.
+    CIADPI_BIN="$STUB_BIN/ciadpi"
+    cd "$DECOY_DIR" || exit 1
+
+    calls_reset
+    start_ciadpi_foreground '*' >/dev/null 2>&1
+    rc=$?
+    trace="$(calls)"
+
+    check_eq "no-glob:ciadpi-rc" 0 "$rc"
+    check_has "no-glob:argv-literal-star" "$trace" 'ciadpi --ip 127.0.0.1 --port 1080 *'
+    check_has_not "no-glob:argv-no-decoy-aaa" "$trace" 'aaa.conf'
+    check_has_not "no-glob:argv-no-decoy-bbb" "$trace" 'bbb.conf'
+)
+
+# --------------------------------------------------------------------------
+# l — teardown tolerance and the recorded transparent backend
+# --------------------------------------------------------------------------
+
+(
+    DRY_RUN=0
+    PROXY_MODE=transparent
+    STUB_RESOLVECTL_STATUS='Global'
+    STUB_GSETTINGS_SCHEMA=1
+    STUB_IPT_DELETE_RC=1
+    export STUB_RESOLVECTL_STATUS STUB_GSETTINGS_SCHEMA STUB_IPT_DELETE_RC
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    STATE_DIR="$TMP/teardown-state"
+    STATE_FILE="$STATE_DIR/prev-state.env"
+
+    save_state lo >/dev/null 2>&1
+    rc=$?
+    check_eq "teardown-tolerance:save-rc" 0 "$rc"
+    check_eq "transparent-state:backend-recorded" 'SAVED_TRANSPARENT_BACKEND=iptables' \
+        "$(grep '^SAVED_TRANSPARENT_BACKEND=' "$STATE_FILE" 2>/dev/null)"
+    check_eq "transparent-state:v6-recorded" 'SAVED_TRANSPARENT_V6=1' \
+        "$(grep '^SAVED_TRANSPARENT_V6=' "$STATE_FILE" 2>/dev/null)"
+
+    calls_reset
+    rc=0
+    # `set -e` on purpose: a failing `iptables -D` must not abort the teardown,
+    # because the proxy/DNS restore runs after the firewall cleanup.
+    ( set -e; restore_state >/dev/null 2>&1 ) || rc=$?
+    check_eq "teardown-tolerance:set-e-rc" 0 "$rc"
+
+    trace="$(calls)"
+    check_has "teardown-tolerance:failing-delete-attempted" "$trace" \
+        'iptables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY'
+    check_has "teardown-tolerance:proxy-still-restored" "$trace" \
+        'gsettings set org.gnome.system.proxy mode'
+    check_has "teardown-tolerance:dns-still-restored" "$trace" 'resolvectl revert lo'
+)
+
+(
+    DRY_RUN=0
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    STATE_DIR="$TMP/nft-recorded-state"
+    STATE_FILE="$STATE_DIR/prev-state.env"
+    mkdir -p "$STATE_DIR"
+    # A hand-written state file as an nft install leaves it. Both tools are in
+    # PATH now, so re-detecting would pick iptables — the recorded backend wins.
+    cat >"$STATE_FILE" <<EOF
+SAVED_IFACE=lo
+SAVED_PROXY_BACKEND=none
+SAVED_DNS_BACKEND=none
+SAVED_DNS_APPLIED=0
+SAVED_TRANSPARENT_BACKEND=nft
+SAVED_TRANSPARENT_V6=1
+EOF
+
+    calls_reset
+    restore_state >/dev/null 2>&1
+    rc=$?
+    trace="$(calls)"
+
+    check_eq "transparent-backend:recorded-rc" 0 "$rc"
+    # Both tools are reachable, so only the order proves which one the state
+    # file chose: the recorded nft teardown runs before the iptables leftovers.
+    nft_del_line="$(grep -n 'nft delete table ip goodbyedpi_turkey' "$CALLS_LOG" 2>/dev/null | head -n 1 | cut -d: -f1)"
+    ipt_del_line="$(grep -n 'iptables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY' "$CALLS_LOG" 2>/dev/null | head -n 1 | cut -d: -f1)"
+    order='missing'
+    if [ -n "$nft_del_line" ] && [ -n "$ipt_del_line" ] && [ "$nft_del_line" -lt "$ipt_del_line" ]; then
+        order='ok'
+    fi
+    check_eq "transparent-backend:recorded-nft-torn-down-first" 'ok' "$order"
+    check_has "transparent-backend:recorded-nft6-torn-down" "$trace" \
+        'nft delete table ip6 goodbyedpi_turkey6'
+    check_has "transparent-backend:iptables-leftovers-cleaned" "$trace" \
+        'iptables -t nat -D OUTPUT -j GOODBYEDPI_TURKEY'
+)
+
+# --------------------------------------------------------------------------
+# m — end-to-end order: snapshot, then apply, then restore
+#
+# Protects the trap/teardown ordering (O3): a run must snapshot the previous
+# state before it changes anything, and the restore must come afterwards.
+# --------------------------------------------------------------------------
+
+(
+    DRY_RUN=0
+    STUB_RESOLVECTL_STATUS='Global'
+    export STUB_RESOLVECTL_STATUS
+    # shellcheck source=/dev/null
+    . "$LIB_FILE"
+    STATE_DIR="$TMP/e2e-state"
+    STATE_FILE="$STATE_DIR/prev-state.env"
+
+    calls_reset
+    save_state lo >/dev/null 2>&1
+    apply_dns lo >/dev/null 2>&1
+    restore_state >/dev/null 2>&1
+    rc=$?
+    check_eq "e2e:dns-apply-restore-rc" 0 "$rc"
+
+    save_line="$(grep -n "tee ${STATE_FILE}.tmp" "$CALLS_LOG" 2>/dev/null | head -n 1 | cut -d: -f1)"
+    apply_line="$(grep -n 'resolvectl dns lo 77.88.8.8 77.88.8.1' "$CALLS_LOG" 2>/dev/null | head -n 1 | cut -d: -f1)"
+    restore_line="$(grep -n 'resolvectl revert lo' "$CALLS_LOG" 2>/dev/null | head -n 1 | cut -d: -f1)"
+
+    order='missing'
+    if [ -n "$save_line" ] && [ -n "$apply_line" ] && [ -n "$restore_line" ] &&
+        [ "$save_line" -lt "$apply_line" ] && [ "$apply_line" -lt "$restore_line" ]; then
+        order='ok'
+    fi
+    check_eq "e2e:snapshot-then-apply-then-restore" 'ok' "$order"
+    if [ -e "$STATE_FILE" ]; then
+        fail "e2e:state-file-removed"
+    else
+        pass "e2e:state-file-removed"
+    fi
 )
 
 # --------------------------------------------------------------------------
