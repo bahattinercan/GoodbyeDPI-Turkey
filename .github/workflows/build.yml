@@ -2,6 +2,15 @@ name: Build GoodbyeDPI
 
 on:
   push:
+    # A `release-*` tag push publishes a release (see the `release` job below).
+    # GitHub does not evaluate `paths` filters for tag pushes, so a matching
+    # tag always runs this workflow no matter which files the tag contains.
+    # `branches` must be listed explicitly: with only `tags` defined, GitHub
+    # skips the workflow for branch pushes altogether.
+    branches:
+      - '**'
+    tags:
+      - 'release-*'
     paths:
       - 'src/**'
       - 'windows/**'
@@ -16,7 +25,8 @@ on:
   workflow_dispatch:
 
 # This workflow runs repo-provided build code on pull_request, so the default
-# GITHUB_TOKEN scopes are far too broad for it. Least privilege: read-only.
+# GITHUB_TOKEN scopes are far too broad for it. Least privilege: read-only for
+# everything; only the `release` job below grants itself write access.
 permissions:
   contents: read
 
@@ -38,17 +48,20 @@ jobs:
 
       - name: Declare short commit variable
         id: vars
+        shell: bash
         run: |
-          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       # The previous wrapped command relied on a helper package that is not
       # present on the current ubuntu-latest image and failed after ~3s.
       # Plain apt-get is robust and idempotent.
       - name: Install MinGW-w64
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-mingw-w64
-        shell: bash
 
       - name: Download WinDivert from cache
         id: windivert-cache
@@ -59,27 +72,57 @@ jobs:
 
       - name: Download WinDivert from the website
         if: steps.windivert-cache.outputs.cache-hit != 'true'
-        run: >
-          wget ${{ env. WINDIVERT_URL }} &&
-          (echo ${{ env. WINDIVERT_SHA256 }} ${{ env. WINDIVERT_NAME }} | sha256sum -c)
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget "${{ env.WINDIVERT_URL }}"
+          echo "${{ env.WINDIVERT_SHA256 }}  ${{ env.WINDIVERT_NAME }}" | sha256sum -c
 
       - name: Unpack WinDivert
-        run: unzip ${{ env. WINDIVERT_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip "${{ env.WINDIVERT_NAME }}"
 
       - name: Compile x86_64
-        run: >
-          cd src && make clean &&
-          make CPREFIX=x86_64-w64-mingw32- BIT64=1 WINDIVERTHEADERS=../${{ env.WINDIVERT_BASENAME }}/include WINDIVERTLIBS=../${{ env.WINDIVERT_BASENAME }}/x64 -j4
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          make clean
+          make CPREFIX=x86_64-w64-mingw32- BIT64=1 \
+            WINDIVERTHEADERS=../${{ env.WINDIVERT_BASENAME }}/include \
+            WINDIVERTLIBS=../${{ env.WINDIVERT_BASENAME }}/x64 -j4
 
       - name: Prepare x86_64 directory
+        shell: bash
         run: |
-          mkdir goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
-          cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x64/*.{dll,sys} goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}
+          set -euo pipefail
+          OUT="goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}"
+          mkdir "$OUT"
+          cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x64/*.{dll,sys} "$OUT"
+
+      # The launchers, the Turkish readme, the uninstall guide and the licence
+      # ship next to the exe so that extracting the ZIP is already a usable
+      # install. They are copied before the manifest step on purpose: the
+      # manifest must cover every file in the staged directory.
+      - name: Add launchers and docs x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}"
+          cp windows/*.cmd "$OUT/"
+          cp "windows/README-BEN OKU.txt" "$OUT/"
+          cp README.md REVERT.md LICENSE "$OUT/"
 
       # The manifest is written inside the staged directory, so the existing
       # directory artifact path picks it up without changing artifact names.
       - name: Write SHA256 manifest x86_64
-        run: sha256sum goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}/* > goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}/SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="goodbyedpi_x86_64_${{ steps.vars.outputs.sha_short }}"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS"
 
       - name: Upload output file x86_64
         uses: actions/upload-artifact@v4
@@ -89,17 +132,38 @@ jobs:
           retention-days: 14
 
       - name: Compile i686
-        run: >
-          cd src && make clean &&
-          make CPREFIX=i686-w64-mingw32- WINDIVERTHEADERS=../${{ env.WINDIVERT_BASENAME }}/include WINDIVERTLIBS=../${{ env.WINDIVERT_BASENAME }}/x86 -j4
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src
+          make clean
+          make CPREFIX=i686-w64-mingw32- \
+            WINDIVERTHEADERS=../${{ env.WINDIVERT_BASENAME }}/include \
+            WINDIVERTLIBS=../${{ env.WINDIVERT_BASENAME }}/x86 -j4
 
       - name: Prepare x86 directory
+        shell: bash
         run: |
-          mkdir goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
-          cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x86/*.{dll,sys} goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}
+          set -euo pipefail
+          OUT="goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}"
+          mkdir "$OUT"
+          cp src/goodbyedpi.exe ${{ env.WINDIVERT_BASENAME }}/x86/*.{dll,sys} "$OUT"
+
+      - name: Add launchers and docs x86
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}"
+          cp windows/*.cmd "$OUT/"
+          cp "windows/README-BEN OKU.txt" "$OUT/"
+          cp README.md REVERT.md LICENSE "$OUT/"
 
       - name: Write SHA256 manifest x86
-        run: sha256sum goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}/* > goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}/SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="goodbyedpi_x86_${{ steps.vars.outputs.sha_short }}"
+          sha256sum "$OUT"/* > "$OUT/SHA256SUMS"
 
       - name: Upload output file x86
         uses: actions/upload-artifact@v4
@@ -126,11 +190,16 @@ jobs:
 
       - name: Declare short commit variable
         id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Pick artifact arch name
         id: arch
+        shell: bash
         run: |
+          set -euo pipefail
           if [[ "${{ matrix.os }}" == "macos-15-intel" ]]; then
             echo "name=macos_x86_64" >> "$GITHUB_OUTPUT"
           else
@@ -138,17 +207,22 @@ jobs:
           fi
 
       - name: Sanity-check bash scripts
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           chmod +x macos/build.sh macos/scripts/*.sh
           for f in macos/build.sh macos/scripts/*.sh; do bash -n "$f"; done
 
       - name: Build ciadpi
-        run: ./macos/build.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./macos/build.sh
 
       - name: Stage release directory
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           OUT="goodbyedpi-turkey_${{ steps.arch.outputs.name }}_${{ steps.vars.outputs.sha_short }}"
           mkdir -p "$OUT/bin" "$OUT/scripts" "$OUT/launchd"
           cp macos/bin/ciadpi                                      "$OUT/bin/"
@@ -166,3 +240,147 @@ jobs:
           name: ${{ env.OUT }}
           path: ${{ env.OUT }}
           retention-days: 14
+
+  # Publishing. Runs only for a `release-*` tag push: the build artifacts are
+  # turned into user-ready packages and published as a GitHub Release. This is
+  # the only job that needs write access; the build jobs above stay read-only.
+  release:
+    name: Publish release
+    needs: [build, build-macos]
+    if: startsWith(github.ref, 'refs/tags/release-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Full history so `gh --generate-notes` can walk back to the
+          # previous tag.
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # The version is derived from the tag, never hardcoded:
+      # release-0.2.3rc4-turkey -> 0.2.3rc4-turkey.
+      - name: Resolve version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#release-}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            echo "tag '$GITHUB_REF_NAME' is not of the form release-<version>" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version: $VERSION"
+
+      # Flat ZIP root: the launchers sit next to the exe, so a plain "extract
+      # all" already produces a working folder. The manifest from the build
+      # job is regenerated with plain filenames, since the artifact copy
+      # carries the staging directory prefix.
+      - name: Package Windows x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find artifacts -mindepth 1 -maxdepth 1 -type d -name 'goodbyedpi_x86_64_*' | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one x86_64 Windows artifact, found $count" >&2
+            exit 1
+          fi
+          src=$(find artifacts -mindepth 1 -maxdepth 1 -type d -name 'goodbyedpi_x86_64_*')
+          pkg="goodbyedpi-$VERSION"
+          mkdir "$pkg"
+          cp -R "$src"/. "$pkg"/
+          rm -f "$pkg/SHA256SUMS"
+          ( cd "$pkg" && sha256sum * > SHA256SUMS )
+          zip -q -j "goodbyedpi-$VERSION.zip" "$pkg"/*
+          rm -rf "$pkg"
+
+      - name: Package Windows x86
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
+            -name 'goodbyedpi_x86_*' ! -name 'goodbyedpi_x86_64_*' | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "expected exactly one 32-bit Windows artifact, found $count" >&2
+            exit 1
+          fi
+          src=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
+            -name 'goodbyedpi_x86_*' ! -name 'goodbyedpi_x86_64_*')
+          pkg="goodbyedpi-$VERSION-x86"
+          mkdir "$pkg"
+          cp -R "$src"/. "$pkg"/
+          rm -f "$pkg/SHA256SUMS"
+          ( cd "$pkg" && sha256sum * > SHA256SUMS )
+          zip -q -j "goodbyedpi-$VERSION-x86.zip" "$pkg"/*
+          rm -rf "$pkg"
+
+      # Source package: the repository layout is kept inside a versioned top
+      # directory. No compiled `ciadpi`: linux/bin/ is gitignored build output
+      # and must not be shipped.
+      - name: Package Linux sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="goodbyedpi-$VERSION-linux"
+          mkdir -p "$pkg/linux"
+          cp linux/build.sh linux/Makefile "$pkg/linux/"
+          cp -R linux/scripts linux/systemd linux/tests "$pkg/linux/"
+          cp linux/README.md "$pkg/linux/README.md"
+          cp README.md REVERT.md LICENSE "$pkg/"
+          if [ -e "$pkg/linux/bin" ]; then
+            echo "refusing to package a prebuilt linux/bin directory" >&2
+            exit 1
+          fi
+          tar -czf "$pkg.tar.gz" "$pkg"
+          rm -rf "$pkg"
+
+      - name: Package macOS arm64 and x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in arm64 x86_64; do
+            count=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
+              -name "goodbyedpi-turkey_macos_${arch}_*" | wc -l)
+            if [ "$count" -ne 1 ]; then
+              echo "expected exactly one macOS ${arch} artifact, found $count" >&2
+              exit 1
+            fi
+            src=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
+              -name "goodbyedpi-turkey_macos_${arch}_*")
+            pkg="goodbyedpi-$VERSION-macos-$arch"
+            mkdir "$pkg"
+            cp -R "$src"/. "$pkg"/
+            tar -czf "$pkg.tar.gz" "$pkg"
+            rm -rf "$pkg"
+          done
+
+      # Last step before publishing: one manifest covering every asset.
+      - name: Write SHA256SUMS for all assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum goodbyedpi-*.zip goodbyedpi-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "release-$VERSION" \
+            --verify-tag \
+            --title "GoodbyeDPI-Turkey $VERSION" \
+            --generate-notes \
+            "goodbyedpi-$VERSION.zip" \
+            "goodbyedpi-$VERSION-x86.zip" \
+            "goodbyedpi-$VERSION-linux.tar.gz" \
+            "goodbyedpi-$VERSION-macos-arm64.tar.gz" \
+            "goodbyedpi-$VERSION-macos-x86_64.tar.gz" \
+            SHA256SUMS
