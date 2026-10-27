@@ -66,7 +66,12 @@ Bu forkun kendi sürümleri **en son sürüm** sayfasında yayınlanır:
 | `goodbyedpi-<sürüm>-linux.tar.gz` | Linux | `linux/` portu (`build.sh`, `Makefile`, `scripts/`, `systemd/`, `tests/`, `README.md`) ve kök `README.md`, `REVERT.md`, `LICENSE`; derlenmiş `ciadpi` **yoktur** |
 | `goodbyedpi-<sürüm>-macos-arm64.tar.gz` | macOS Apple Silicon | `bin/ciadpi`, `scripts/`, `launchd/…plist.template`, `README.md` |
 | `goodbyedpi-<sürüm>-macos-x86_64.tar.gz` | macOS Intel | aynı içerik, Intel derlemesi |
-| `SHA256SUMS` | — | Yukarıdaki beş paketin SHA256 özeti |
+| `SHA256SUMS` | — | Yukarıdaki paketlerin SHA256 özeti |
+
+> [!NOTE]
+> macOS Apple Silicon (`arm64`) paketi, GitHub'ın arm64 runner kapasitesi
+> nedeniyle bazı sürümlerde yer almayabilir. Her sürümde hangi paketlerin
+> yayınlandığı o sürümün release notlarında belirtilir.
 
 > [!NOTE]
 > Bu paketler CI'da (GitHub Actions) üretilir: `release-*` etiketi

@@ -183,6 +183,11 @@ jobs:
         # August 2027.
         os: [macos-15-intel, macos-14]
     runs-on: ${{ matrix.os }}
+    # GitHub's Apple Silicon (macos-14) runner pool is capacity-limited and a leg
+    # can stay queued or fail for reasons outside this repository. Only that leg
+    # is tolerated: the Intel leg stays a hard failure, and the release job below
+    # publishes whatever macOS packages were actually produced.
+    continue-on-error: ${{ matrix.os == 'macos-14' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -247,7 +252,10 @@ jobs:
   release:
     name: Publish release
     needs: [build, build-macos]
-    if: startsWith(github.ref, 'refs/tags/release-')
+    # Publishing must not depend on macOS runner availability: the Windows build
+    # is mandatory, the macOS legs are optional (see `build-macos` above).
+    # `always()` keeps the job in the graph after a tolerated macOS failure.
+    if: always() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/release-')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -340,15 +348,25 @@ jobs:
           tar -czf "$pkg.tar.gz" "$pkg"
           rm -rf "$pkg"
 
+      # A missing macOS artifact is not an error: the arch was skipped or its
+      # runner was unavailable. It is recorded in the run summary and listed in
+      # the release notes instead. More than one artifact for an arch is still a
+      # hard failure, because the package would be ambiguous.
       - name: Package macOS arm64 and x86_64
         shell: bash
         run: |
           set -euo pipefail
+          missing=""
           for arch in arm64 x86_64; do
             count=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
               -name "goodbyedpi-turkey_macos_${arch}_*" | wc -l)
-            if [ "$count" -ne 1 ]; then
-              echo "expected exactly one macOS ${arch} artifact, found $count" >&2
+            if [ "$count" -eq 0 ]; then
+              echo "macOS ${arch} paketi bu koşuda üretilemedi (runner kapasitesi)" >> "$GITHUB_STEP_SUMMARY"
+              missing="${missing:+$missing, }macOS ${arch}"
+              continue
+            fi
+            if [ "$count" -gt 1 ]; then
+              echo "expected at most one macOS ${arch} artifact, found $count" >&2
               exit 1
             fi
             src=$(find artifacts -mindepth 1 -maxdepth 1 -type d \
@@ -359,13 +377,40 @@ jobs:
             tar -czf "$pkg.tar.gz" "$pkg"
             rm -rf "$pkg"
           done
+          echo "MISSING_MACOS=$missing" >> "$GITHUB_ENV"
 
-      # Last step before publishing: one manifest covering every asset.
+      # The release body is Turkish, so it is written here instead of relying on
+      # `--generate-notes` alone; gh appends the generated notes after this text.
+      - name: Write release notes preamble
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "GoodbyeDPI-Turkey $VERSION"
+            echo
+            echo "Bu sürüm Windows (x86_64 ve 32-bit) ve Linux kaynak paketini içerir."
+            if [ -n "${MISSING_MACOS:-}" ]; then
+              echo
+              echo "Bu sürümde şu paketler yer almıyor: ${MISSING_MACOS}."
+            else
+              echo "macOS (Apple Silicon ve Intel) paketleri de bu sürümde yer alıyor."
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
+      # Last step before publishing: one manifest covering the packages that
+      # actually exist, so a skipped macOS leg cannot break it.
       - name: Write SHA256SUMS for all assets
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum goodbyedpi-*.zip goodbyedpi-*.tar.gz > SHA256SUMS
+          shopt -s nullglob
+          assets=(goodbyedpi-*.zip goodbyedpi-*.tar.gz)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no packages were produced, refusing to publish" >&2
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub release
@@ -374,13 +419,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Dynamic asset list: only the packages that were really produced are
+          # attached, so a skipped macOS arch never aborts the release.
+          shopt -s nullglob
+          assets=(goodbyedpi-*.zip goodbyedpi-*.tar.gz SHA256SUMS)
+          printf 'release assets: %s\n' "${assets[@]}"
           gh release create "release-$VERSION" \
             --verify-tag \
             --title "GoodbyeDPI-Turkey $VERSION" \
+            --notes-file release-notes.md \
             --generate-notes \
-            "goodbyedpi-$VERSION.zip" \
-            "goodbyedpi-$VERSION-x86.zip" \
-            "goodbyedpi-$VERSION-linux.tar.gz" \
-            "goodbyedpi-$VERSION-macos-arm64.tar.gz" \
-            "goodbyedpi-$VERSION-macos-x86_64.tar.gz" \
-            SHA256SUMS
+            "${assets[@]}"
