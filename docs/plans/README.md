@@ -13,6 +13,9 @@ kod tanımlayıcıları İngilizce kalır.
 |---|---|---|
 | [`2026-10-26-linux-sertlestirme.md`](2026-10-26-linux-sertlestirme.md) | **Tamamlandı** | Linux portu (byedpi/ciadpi) + güvenlik sertleştirmesi + gsettings/DNS/203-EXEC düzeltmeleri |
 | [`2026-10-27-windows-guvenlik.md`](2026-10-27-windows-guvenlik.md) | **Onay bekliyor** | Windows tarafı güvenlik denetimi bulguları (W1–W13) ve CI-öncelikli düzeltme planı |
+| [`2026-10-27-readme-denetim.md`](2026-10-27-readme-denetim.md) | **Tamamlandı (denetim)** | README.md yapısal/içerik denetimi: 31 numaralı kanıtlı bulgu, önerilen başlık iskeleti, P0/P1/P2 öncelik listesi |
+| [`2026-10-27-readme-linux-denetim.md`](2026-10-27-readme-linux-denetim.md) | **Tamamlandı (denetim)** | README'nin Linux bölümü ↔ `linux/` kaynak denetimi: 72 iddia (47 DOGRU, 1 YANLIS, 23 EKSIK, 1 DOGRULANMADI) |
+| [`2026-10-27-readme-windows-denetim.md`](2026-10-27-readme-windows-denetim.md) | **Tamamlandı (denetim)** | README'nin Windows bölümleri ↔ `windows/` denetimi: 44 satır (19 DOGRU, 8 YANLIS, 12 EKSIK, 5 DOGRULANMADI) |
 
 ## Plan şablonu
 
